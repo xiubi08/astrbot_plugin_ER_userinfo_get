@@ -1,0 +1,14 @@
+{
+  "open_api_key": {
+    "description": "官方 Open API Key（可选）",
+    "type": "string",
+    "default": "",
+    "hint": "留空则走 dak.gg 同步方式；填写后玩家数据查询改走官方直查（保证最新段位/MMR），dak.gg 仅用于补充段位图标。申请地址: https://developer.eternalreturn.io"
+  },
+  "qq_buttons_enabled": {
+    "description": "QQbot模式",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后，QQ 官方机器人（qq_official）的玩家战绩查询出图后，会在消息底部附带一排指令按钮（帮助/上一赛季/下一赛季/备注玩家）。这是官方「消息按钮互动」能力：消息携带 keyboard 字段，按钮挂载于消息底部，点击后自动填入指令并发送。按钮消息走被动回复通道，不占用主动消息配额，也不影响主查询结果；仅 QQ 官方平台生效，其他平台自动忽略，发送失败自动降级为纯图/文本。"
+  }
+}

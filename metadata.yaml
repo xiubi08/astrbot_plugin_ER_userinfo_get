@@ -1,0 +1,6 @@
+name: astrbot_plugin_ER_userinfo_get
+display_name: 永恒轮回战绩查询
+desc: "从dak.gg获取永恒轮回的玩家对局和段位信息。"
+version: v4.0.0
+author: 椛椿&小休比
+repo: https://github.com/MomijiOXO/astrbot_plugin_ER_userinfo_get
