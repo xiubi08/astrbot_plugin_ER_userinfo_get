@@ -105,8 +105,9 @@ class ERRenderer:
         # 韩文字体分层
         self.kr_font_title = self._load_named_font("NotoSansKR-Bold", RENDER.font_title_size)
         self.kr_font_big = self._load_named_font("NotoSansKR-Bold", RENDER.font_big_size)
-        self.kr_font = self._load_named_font("NotoSansKR-SemiBold", RENDER.font_module_size)
-        self.kr_font_small = self._load_named_font("NotoSansKR-Medium", RENDER.font_body_size)
+        # 韩文字体仅保留 Bold/Regular 两档以压缩体积，SemiBold/Medium 分别映射到这两档
+        self.kr_font = self._load_named_font("NotoSansKR-Bold", RENDER.font_module_size)
+        self.kr_font_small = self._load_named_font("NotoSansKR-Regular", RENDER.font_body_size)
         self.kr_font_tiny = self._load_named_font("NotoSansKR-Regular", RENDER.font_small_size)
         self.kr_font_mini = self._load_named_font("NotoSansKR-Regular", RENDER.font_mini_size)
         self.has_kr_font = self._font_file_exists("NotoSansKR-Regular")
