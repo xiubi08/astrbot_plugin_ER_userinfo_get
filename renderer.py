@@ -105,12 +105,11 @@ class ERRenderer:
         # 韩文字体分层
         self.kr_font_title = self._load_named_font("NotoSansKR-Bold", RENDER.font_title_size)
         self.kr_font_big = self._load_named_font("NotoSansKR-Bold", RENDER.font_big_size)
-        # 韩文字体仅保留 Bold/Regular 两档以压缩体积，SemiBold/Medium 分别映射到这两档
-        self.kr_font = self._load_named_font("NotoSansKR-Bold", RENDER.font_module_size)
-        self.kr_font_small = self._load_named_font("NotoSansKR-Regular", RENDER.font_body_size)
+        self.kr_font = self._load_named_font("NotoSansKR-SemiBold", RENDER.font_module_size)
+        self.kr_font_small = self._load_named_font("NotoSansKR-Medium", RENDER.font_body_size)
         self.kr_font_tiny = self._load_named_font("NotoSansKR-Regular", RENDER.font_small_size)
         self.kr_font_mini = self._load_named_font("NotoSansKR-Regular", RENDER.font_mini_size)
-        self.has_kr_font = self._font_file_exists("NotoSansKR-Regular")
+        self.has_kr_font = self._font_file_exists("NotoSansKR-Bold")
 
         # ===== 白色主题 =====
         self.bg = RENDER.bg
@@ -272,7 +271,21 @@ class ERRenderer:
     # =========================
     # 字体
     # =========================
+    # 字体瘦身：仅保留 中文 Bold(玩家名) + Chinese Semibold(其他) + 韩文 Bold。
+    # 其余被移除的权重统一映射到保留档，保证所有调用点都能命中字体文件、不退化到系统字体。
+    _WEIGHT_ALIASES = {
+        "MiSans-Medium": "MiSans-Semibold",
+        "MiSans-Regular": "MiSans-Semibold",
+        "NotoSansKR-Medium": "NotoSansKR-Bold",
+        "NotoSansKR-Regular": "NotoSansKR-Bold",
+        "NotoSansKR-SemiBold": "NotoSansKR-Bold",
+    }
+
+    def _canonical_font_stem(self, font_stem: str) -> str:
+        return self._WEIGHT_ALIASES.get(font_stem, font_stem)
+
     def _load_named_font(self, font_stem: str, size: int):
+        font_stem = self._canonical_font_stem(font_stem)
         candidates = [
             f"{font_stem}.ttf",
             f"{font_stem}.otf",
