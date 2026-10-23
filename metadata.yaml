@@ -2,7 +2,7 @@ name: astrbot_plugin_ER_userinfo_get
 display_name: 永恒轮回战绩查询
 short_desc: 查询永恒轮回玩家/角色战绩、段位与评级
 desc: "获取永恒轮回（Eternal Return）的玩家对局、段位和角色数据。支持玩家战绩查询（含队友详情）、历史赛季、角色评级排行、排行榜、备注（玩家/角色/武器）、小组管理；QQ 官方机器人支持指令面板与战绩卡下方的按钮切换赛季。"
-version: v4.0.0
+version: v4.1.0
 author: 椛椿&小休比
 repo: https://github.com/xiubi08/astrbot_plugin_ER_userinfo_get
 astrbot_version: ">=4.17.0"
