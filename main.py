@@ -41,11 +41,7 @@ from .qq_panel_manager import (
     sync_panels,
 )
 
-try:
-    from astrbot.api import logger
-except Exception:
-    import logging
-    logger = logging.getLogger(__name__)
+from astrbot.api import logger
 
 
 # 资源更新进行中，其它本插件指令返回的占位提示
@@ -246,7 +242,6 @@ class ERProfilePlugin(Star):
         self._network_time_base: datetime | None = None
         self._network_time_monotonic_base = 0.0
         self._last_time_sync_monotonic = 0.0
-        self._sync_network_time(force=True)
         # 启动 pending 清理后台线程
         self._start_pending_cleanup_task()
 
@@ -262,7 +257,30 @@ class ERProfilePlugin(Star):
         # ===== 默认配置 =====
         self.default_match_count = QUERY.default_match_count
         self.max_match_count = QUERY.max_match_count
-        self.default_season = self._init_default_season()
+        # 先用兜底赛季，真实当前赛季由后台线程解析后覆盖（构造函数内禁止同步网络请求）
+        self.default_season = QUERY.fallback_season
+        self._start_initial_network_tasks()
+
+    def _start_initial_network_tasks(self) -> None:
+        """后台完成启动阶段的网络初始化（网络时间同步 + 当前赛季解析）。
+
+        __init__ 运行在 AstrBot 事件循环线程上，同步 requests 会阻塞事件循环，
+        因此统一放入独立守护线程执行；任一步失败都回退到本地时间 / 兜底赛季。
+        """
+
+        def _worker() -> None:
+            try:
+                self._sync_network_time(force=True)
+            except Exception as e:
+                logger.warning(f"[ER战绩] 后台同步网络时间失败，使用本地时间兜底: {e}")
+            try:
+                self.default_season = self._init_default_season()
+            except Exception as e:
+                logger.warning(
+                    f"[ER战绩] 后台获取当前赛季失败，使用兜底赛季 {QUERY.fallback_season}: {e}"
+                )
+
+        threading.Thread(target=_worker, name="ER_init_network", daemon=True).start()
 
 
 
@@ -760,8 +778,8 @@ class ERProfilePlugin(Star):
             yield event.plain_result(
                 f"正在查询 {player_name} 的 {season_display} 赛季 {query_mode_label}最近 {match_count} 场战绩喵"
             )
-            # 等待 pending 查询结果
-            signaled = wait_evt.wait(timeout=CACHE.pending_wait_timeout)
+            # 等待 pending 查询结果（阻塞等待放到线程，避免阻塞事件循环）
+            signaled = await asyncio.to_thread(wait_evt.wait, CACHE.pending_wait_timeout)
             if signaled and pending.get("result") is not None and Path(pending["result"]).exists():
                 yield event.image_result(pending["result"])
                 return

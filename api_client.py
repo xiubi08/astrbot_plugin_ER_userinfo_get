@@ -12,11 +12,7 @@ import time
 
 from .config import NETWORK, QUERY
 
-try:
-    from astrbot.api import logger
-except Exception:
-    import logging
-    logger = logging.getLogger(__name__)
+from astrbot.api import logger
 
 # 全局对外API并发限制：避免高峰期多个任务同时发起大量请求占满连接/带宽
 _GLOBAL_API_SEMAPHORE = threading.Semaphore(NETWORK.global_api_semaphore)

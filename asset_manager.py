@@ -4,11 +4,7 @@ import json
 from pathlib import Path
 from typing import Any, Optional
 
-try:
-    from astrbot.api import logger
-except Exception:
-    import logging
-    logger = logging.getLogger(__name__)
+from astrbot.api import logger
 
 
 class AssetManager:

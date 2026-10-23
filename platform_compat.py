@@ -8,11 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-try:
-    from astrbot.api import logger
-except Exception:  # 非 AstrBot 环境下退化为标准 logging
-    import logging
-    logger = logging.getLogger(__name__)
+from astrbot.api import logger
 
 # QQ 官方机器人适配器（botpy 底层）的平台名
 QQ_OFFICIAL_NAMES = frozenset({"qq_official", "qq_official_webhook"})

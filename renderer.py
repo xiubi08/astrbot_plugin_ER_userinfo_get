@@ -11,11 +11,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from .config import RENDER, LOCK
 
-try:
-    from astrbot.api import logger
-except Exception:
-    import logging
-    logger = logging.getLogger(__name__)
+from astrbot.api import logger
 
 
 # ============================================================
