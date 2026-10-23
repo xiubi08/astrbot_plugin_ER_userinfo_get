@@ -2072,10 +2072,21 @@ class ERProfilePlugin(Star):
             "in1000": "in1000",
             "in100": "in1000",
             "星陨": "meteorite_plus",
+            "星陨+": "meteorite_plus",
             "灭钻": "diamond_plus",
+            "灭钻+": "diamond_plus",
             "无瑕": "mithril_plus",
+            "无瑕+": "mithril_plus",
             "修罗": "asura_plus",
+            "修罗+": "asura_plus",
         }
+
+        # 段位名的拼音键，用于识别同音错别字（如 无暇 → 无瑕），避免被误当成角色名报"未找到角色"
+        tier_pinyin_keys: dict[str, str] = {}
+        for _tier_name, _tier_value in tier_aliases.items():
+            _pkey = "".join(self.assets._to_pinyin_key(_tier_name))
+            if _pkey:
+                tier_pinyin_keys.setdefault(_pkey, _tier_value)
 
         parts = list(raw_parts)
         tier_parts = []
@@ -2085,13 +2096,20 @@ class ERProfilePlugin(Star):
                 tier_parts.append(p)
             elif lower.startswith("in"):
                 tier_parts.append(p)
+            else:
+                # 段位同音错别字（如 无暇→无瑕）；若该词同时是角色名则按角色处理，不当作段位
+                _pkey = "".join(self.assets._to_pinyin_key(p))
+                if _pkey and _pkey in tier_pinyin_keys and not self.assets.find_character_by_name(p):
+                    tier_parts.append(p)
 
         for tp in tier_parts:
-            mapped = tier_aliases.get(tp.lower(), tier_aliases.get(tp, ""))
-            if mapped:
-                tier = mapped
-            elif tp.lower().startswith("in"):
+            base = tp.lower()
+            if base in tier_aliases:
+                tier = tier_aliases[base]
+            elif base.startswith("in"):
                 tier = "in1000"
+            else:
+                tier = tier_pinyin_keys.get("".join(self.assets._to_pinyin_key(tp)), tier)
             parts.remove(tp)
 
         if len(parts) >= 2:
