@@ -18,11 +18,7 @@ from typing import Any, Optional
 
 from .platform_compat import get_qq_official_clients
 
-try:
-    from astrbot.api import logger
-except Exception:  # 非 AstrBot 环境下退化为标准 logging
-    import logging
-    logger = logging.getLogger(__name__)
+from astrbot.api import logger
 
 try:
     import aiohttp
