@@ -2866,12 +2866,7 @@ class ERRenderer:
                     frame_x = inner_x1 + INNER_PAD2
                     frame_y = row_y + 2
 
-                    bg_color = self._get_item_bg_color(item_grade)
-                    draw.rounded_rectangle(
-                        (frame_x, frame_y, frame_x + ITEM_ICON_SZ, frame_y + ITEM_ICON_SZ),
-                        radius=8,
-                        fill=bg_color,
-                    )
+                    frame_color = self._get_item_bg_color(item_grade)
 
                     inner_sz = ITEM_ICON_SZ - ITEM_PAD * 2
                     icon = self._load_icon_fixed(item_icon, (inner_sz, inner_sz)) if item_icon else None
@@ -2887,6 +2882,8 @@ class ERRenderer:
                             radius=5,
                             fill=(100, 100, 100),
                         )
+
+                    self._draw_item_glow_frame(img, frame_x, frame_y, ITEM_ICON_SZ, ITEM_ICON_SZ, frame_color)
 
                     text_x = frame_x + ITEM_ICON_SZ + 10
                     text_max_w = (inner_x2 - INNER_PAD2) - text_x - 4
