@@ -1136,6 +1136,7 @@ class ERProfilePlugin(Star):
             "game_id": game_id,
             "mode_label": str(members[0]["entry"].get("mode_label", "") or ""),
             "rank": int(members[0]["entry"].get("rank", 0) or 0),
+            "escaped": bool(members[0]["entry"].get("escaped", False)),
         }
 
     async def _resolve_official_uid(self, player_name: str) -> Optional[str]:
