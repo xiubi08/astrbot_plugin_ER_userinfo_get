@@ -7,7 +7,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, List, Optional
 from concurrent.futures import ThreadPoolExecutor
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 
 from .config import RENDER, LOCK
 
@@ -70,6 +70,9 @@ class ERRenderer:
     # 武器圆形底图精灵：key = (radius, color)
     _dot_sprite_cache: dict[tuple[int, tuple[int, int, int]], Image.Image] = {}
     _dot_sprite_cache_lock = threading.RLock()
+    # 发光边框精灵：key = (size, glow_color, border_color, radius, border, blur, pad, outside_only, gain)
+    _glow_frame_cache: dict[tuple, Image.Image] = {}
+    _glow_frame_cache_lock = threading.RLock()
     # 排行榜外部API数据缓存（main.py中使用，这里提供锁和缓存变量的引用）
 
     def __init__(self, assets, output_dir: Path, fonts_dir: Path):
@@ -773,7 +776,7 @@ class ERRenderer:
             icon_tasks.append((i, character_icon_path, (icon_size, icon_size)))
             icon_positions.append((avatar_x + hero_avatar_inset, avatar_y + hero_avatar_inset))
 
-            self._draw_char_border(draw, avatar_x, avatar_y, hero_avatar_size)
+            self._draw_char_border(img, draw, avatar_x, avatar_y, hero_avatar_size)
 
             draw.text(
                 (name_x, top_y),
@@ -987,7 +990,7 @@ class ERRenderer:
             draw.rectangle((px1, div_y, px2, div_y + 2), fill=(255, 215, 225))
             # 头部仅保留下拉箭头与右侧副信息（排名 · 模式）
             draw.text((px1 + 14, y + 6), "▼", font=self.font_small, fill=self.text)
-            sub = f"#{detail.get('rank', 0)} · {detail.get('mode_label', '')}"
+            sub = f"{'逃生' if detail.get('escaped') else '#' + str(detail.get('rank', 0))} · {detail.get('mode_label', '')}"
             sb = draw.textbbox((0, 0), sub, font=self.font_tiny)
             draw.text((px2 - 14 - (sb[2] - sb[0]), y + 8), sub, font=self.font_tiny, fill=self.sub_text)
 
@@ -1086,7 +1089,7 @@ class ERRenderer:
         if hero_icon:
             self._paste_icon(img, hero_icon, (avatar_x + avatar_inset, avatar_y + avatar_inset))
 
-        self._draw_char_border(draw, avatar_x, avatar_y, avatar_size)
+        self._draw_char_border(img, draw, avatar_x, avatar_y, avatar_size)
 
         # ===== 头像下方：实验体名字 =====
         character_name = str(match.get("character_name", "") or "")
@@ -1191,15 +1194,22 @@ class ERRenderer:
                     rank_text = f"#{rank}"
                     rank_color = self.text
             else:
-                # 普通模式：显示排名数字
-                rank_text = f"#{rank}"
-                rank_color = self.text
-                if rank == 1:
+                # 普通模式：逃生成功显示「逃生」，否则显示排名数字
+                escaped = bool(match.get("escaped", False))
+                if escaped:
+                    rank_text = "逃生"
                     rank_color = self.gold
-                elif rank in (2, 3):
-                    rank_color = (255, 180, 90)
+                else:
+                    rank_text = f"#{rank}"
+                    rank_color = self.text
+                    if rank == 1:
+                        rank_color = self.gold
+                    elif rank in (2, 3):
+                        rank_color = (255, 180, 90)
 
             if is_cobalt_mode and rank in (1, 2):
+                rank_font = self.font
+            elif not is_cobalt_mode and match.get("escaped", False):
                 rank_font = self.font
             else:
                 rank_font = self.font_big
@@ -1388,19 +1398,18 @@ class ERRenderer:
         ]
 
         for i, item in enumerate(items):
-            if i >= len(positions):
-                break
+            # 字典形式的装备会缺失部分部位，按实际部位下标定位，避免错位
+            try:
+                slot = int(item.get("slot", i))
+            except (TypeError, ValueError):
+                slot = i
+            if slot < 0 or slot >= len(positions):
+                continue
 
-            ix, iy = positions[i]
+            ix, iy = positions[slot]
 
             item_grade = item.get("grade", "")
-            bg_color = self._get_item_bg_color(item_grade)
-
-            draw.rounded_rectangle(
-                (ix, iy, ix + item_w, iy + item_h),
-                radius=6,
-                fill=bg_color,
-            )
+            frame_color = self._get_item_bg_color(item_grade)
 
             item_icon = self._load_icon_fixed(item.get("icon", ""), (item_w - item_padding * 2, item_h - item_padding * 2))
             if item_icon:
@@ -1408,6 +1417,8 @@ class ERRenderer:
                 icon_x = ix + (item_w - icon_w) // 2
                 icon_y = iy + (item_h - icon_h) // 2
                 self._paste_icon(img, item_icon, (icon_x, icon_y))
+
+            self._draw_item_glow_frame(img, ix, iy, item_w, item_h, frame_color)
 
         return y + self.MATCH_H
 
@@ -1588,18 +1599,100 @@ class ERRenderer:
     def _draw_inner_card(self, draw: ImageDraw.ImageDraw, x1: int, y1: int, x2: int, y2: int, only_fill: bool = False) -> None:
         draw.rounded_rectangle((x1, y1, x2, y2), radius=12, fill=self.card_2)
 
-    def _draw_char_border(self, draw: ImageDraw.ImageDraw, x: int, y: int, size: int) -> None:
-        """绘制角色图片双边框：外层2px淡粉 + 内层1px亮粉"""
-        inner_inset = 5
-        inner_color = (255, 150, 180)
-        draw.rectangle(
-            (x, y, x + size, y + size),
-            outline=self.pink_border,
-            width=2,
+    @classmethod
+    def _glow_frame_sprite(
+        cls,
+        size: tuple[int, int],
+        glow_color: tuple[int, int, int],
+        border_color: Optional[tuple[int, int, int]] = None,
+        *,
+        radius: int = 0,
+        border: int = 2,
+        blur: int = 6,
+        pad: int = 14,
+        outside_only: bool = False,
+        gain: float = 2.4,
+    ) -> Image.Image:
+        """生成透明中心、带外发光和清晰描边的中空边框精灵。"""
+        border_color = border_color or glow_color
+        key = (size, glow_color, border_color, radius, border, blur, pad, outside_only, float(gain))
+        with cls._glow_frame_cache_lock:
+            cached = cls._glow_frame_cache.get(key)
+            if cached is not None:
+                return cached
+
+        supersample = 4
+        w, h = size
+        sw, sh = w + pad * 2, h + pad * 2
+        W, H = sw * supersample, sh * supersample
+        x0 = y0 = pad * supersample
+        box = [x0, y0, x0 + w * supersample - 1, y0 + h * supersample - 1]
+
+        ring = Image.new("L", (W, H), 0)
+        ring_draw = ImageDraw.Draw(ring)
+        if radius > 0:
+            ring_draw.rounded_rectangle(
+                box, radius=radius * supersample,
+                outline=255, width=max(1, border * supersample),
+            )
+        else:
+            ring_draw.rectangle(box, outline=255, width=max(1, border * supersample))
+
+        mask = ring.filter(ImageFilter.GaussianBlur(blur * supersample))
+        mask = mask.point(lambda a: min(255, int(a * gain)))
+
+        if outside_only:
+            inset = border * supersample
+            inner = Image.new("L", (W, H), 0)
+            inner_draw = ImageDraw.Draw(inner)
+            inner_box = [
+                x0 + inset, y0 + inset,
+                x0 + w * supersample - 1 - inset,
+                y0 + h * supersample - 1 - inset,
+            ]
+            if radius > 0:
+                inner_draw.rounded_rectangle(
+                    inner_box, radius=max(radius * supersample - inset, 0), fill=255,
+                )
+            else:
+                inner_draw.rectangle(inner_box, fill=255)
+            mask = ImageChops.subtract(mask, inner)
+
+        glow = Image.new("RGBA", (W, H), glow_color + (255,))
+        glow.putalpha(mask)
+
+        line = Image.new("RGBA", (W, H), border_color + (255,))
+        line.putalpha(ring)
+
+        sprite = Image.alpha_composite(glow, line)
+        sprite = sprite.resize((sw, sh), Image.LANCZOS)
+        with cls._glow_frame_cache_lock:
+            cls._glow_frame_cache[key] = sprite
+        return sprite
+
+    def _draw_item_glow_frame(self, img: Image.Image, x: int, y: int,
+                              w: int, h: int, color: tuple[int, int, int]) -> None:
+        """在装备图标外叠一层中空发光边框，中心保持透明。"""
+        pad = 12
+        sprite = self._glow_frame_sprite(
+            (w, h), color, color,
+            radius=6, border=3, blur=5, pad=pad, outside_only=False, gain=1.6,
         )
+        img.alpha_composite(sprite, (x - pad, y - pad))
+
+    def _draw_char_border(self, img: Image.Image, draw: ImageDraw.ImageDraw,
+                          x: int, y: int, size: int) -> None:
+        """外发光双边框：外层2px淡粉 + 内层1px亮粉，光晕只落在框外。"""
+        pad = 16
+        sprite = self._glow_frame_sprite(
+            (size, size), (255, 95, 131), self.pink_border,
+            radius=0, border=2, blur=8, pad=pad, outside_only=True, gain=1.8,
+        )
+        img.alpha_composite(sprite, (x - pad, y - pad))
+        inner_inset = 5
         draw.rectangle(
             (x + inner_inset, y + inner_inset, x + size - inner_inset, y + size - inner_inset),
-            outline=inner_color,
+            outline=(255, 150, 180),
             width=1,
         )
 
@@ -2006,7 +2099,7 @@ class ERRenderer:
         char_icon = self._load_character_icon(entry.get("character_icon", ""), (icon_inner, icon_inner))
         if char_icon:
             self._paste_icon(img, char_icon, (avatar_x + AVATAR_INSET, avatar_y + AVATAR_INSET))
-        self._draw_char_border(draw, avatar_x, avatar_y, AVATAR_SZ)
+        self._draw_char_border(img, draw, avatar_x, avatar_y, AVATAR_SZ)
 
         cx = x + w // 2
 
@@ -2236,7 +2329,7 @@ class ERRenderer:
         char_icon = self._load_character_icon(data.get("character_icon", ""), (icon_inner, icon_inner))
         if char_icon:
             self._paste_icon(img, char_icon, (avatar_x + AVATAR_INSET, avatar_y + AVATAR_INSET))
-        self._draw_char_border(draw, avatar_x, avatar_y, AVATAR_SZ)
+        self._draw_char_border(img, draw, avatar_x, avatar_y, AVATAR_SZ)
 
         info_x = avatar_x + AVATAR_SZ + INFO_GAP
         info_y = y + 30
