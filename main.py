@@ -15,7 +15,7 @@ import contextlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 
-from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.star import Context, Star, register
 from astrbot.api import AstrBotConfig
 from astrbot.core.star import StarTools
@@ -886,7 +886,8 @@ class ERProfilePlugin(Star):
         mode_api: str = DEFAULT_MODE_API,
         mode_label: str = DEFAULT_MODE_LABEL,
         official_uid: Optional[str] = None,
-    ) -> str:
+        return_data: bool = False,
+    ) -> Any:
         """【在线程池中执行】同步的玩家查询+映射+渲染流程
 
         并行优化策略：
@@ -1042,6 +1043,8 @@ class ERProfilePlugin(Star):
 
         # ===== 4. 渲染图片（render内部已有信号量控制并发） =====
         image_path = self.renderer.render(render_data)
+        if return_data:
+            return image_path, render_data
         return image_path
 
     def _build_first_match_members(
@@ -2372,3 +2375,314 @@ class ERProfilePlugin(Star):
 
         _RESULT_IMAGE_CACHE.set(cache_key, result, CACHE.character_ranking_ttl)
         yield event.image_result(result)
+
+    # =========================
+    # LLM Tool：查询数据供模型分析
+    # =========================
+
+    async def _send_llm_image(self, event: AstrMessageEvent, image_path: Any) -> None:
+        """Send a rendered card directly; failures must not block the text result."""
+        if not image_path:
+            return
+        try:
+            path = Path(str(image_path))
+            if not path.exists():
+                return
+            await event.send(MessageChain().file_image(str(path)))
+        except Exception as e:
+            logger.warning(f"[ER LLM] 发送图片失败: {e}")
+
+    def _format_profile_llm_text(
+        self,
+        data: dict[str, Any],
+        season_display: str,
+        mode_label: str,
+    ) -> str:
+        player = data.get("player", {}) or {}
+        summary = data.get("summary", {}) or {}
+        lines = [
+            f"【永恒轮回玩家战绩】{player.get('name', '')} · {season_display} · {mode_label}",
+            f"等级 {player.get('level', 0)} | MMR {player.get('mmr', 0)} | 段位 {player.get('tier_name', '未鉴定')}",
+            (
+                f"场次 {summary.get('play', 0)} | 胜率 {summary.get('win_rate', 0)}% | "
+                f"TOP2 {summary.get('top2_rate', 0)}% | TOP3 {summary.get('top3_rate', 0)}% | "
+                f"平均排名 {summary.get('avg_rank', 0)}"
+            ),
+            (
+                f"平均击杀 {summary.get('avg_kill', 0)} | 平均助攻 {summary.get('avg_assist', 0)} | "
+                f"平均 TK {summary.get('avg_tk', 0)} | 平均伤害 {summary.get('avg_damage', 0)}"
+            ),
+            (
+                f"平均狩猎 {summary.get('avg_monster_kill', 0)} | "
+                f"平均荣誉值 {summary.get('avg_vf_credit', 0)} | "
+                f"平均视野贡献 {summary.get('avg_view_contribution', 0)}"
+            ),
+        ]
+
+        heroes = data.get("common_heroes") or []
+        if heroes:
+            hero_text = []
+            for hero in heroes[:5]:
+                hero_text.append(
+                    f"{hero.get('character_name', '')} "
+                    f"{hero.get('play', 0)}场/{hero.get('win_rate', 0)}%"
+                )
+            lines.append("常用英雄：" + "；".join(hero_text))
+
+        matches = data.get("matches") or []
+        if matches:
+            lines.append("最近对局：")
+            for match in matches[:5]:
+                rank = match.get("rank", 0)
+                rank_text = "胜利" if rank == 1 else f"#{rank}"
+                if match.get("mode_label") in ("钴协议", "钴联盟") and rank in (1, 2):
+                    rank_text = "胜利" if rank == 1 else "失败"
+                mmr_change = int(match.get("mmr_change", 0) or 0)
+                rp_text = (
+                    f"RP {match.get('mmr_before', 0)}+{mmr_change}" if mmr_change >= 0
+                    else f"RP {match.get('mmr_before', 0)}{mmr_change}"
+                )
+                lines.append(
+                    f"- {match.get('mode_label', '')} {rank_text} | "
+                    f"{match.get('character_name', '')} | "
+                    f"TK/K/A {match.get('team_kill', 0)}/{match.get('kills', 0)}/{match.get('assists', 0)} | "
+                    f"伤害 {match.get('damage', 0)} | KDA {match.get('kda', 0)} | "
+                    f"{rp_text if match.get('is_rank_match') else '路径ID ' + str(match.get('path_id', 0))}"
+                )
+        lines.append("请只根据以上数据做简短分析，不要编造未提供的数据。")
+        return "\n".join(lines)
+
+    def _format_character_llm_text(self, data: dict[str, Any]) -> str:
+        lines = [
+            f"【永恒轮回角色数据】{data.get('character_name', '')} · "
+            f"{data.get('weapon_name', '')} · {data.get('tier', '')}",
+            (
+                f"样本 {data.get('count', 0)} 场 | 胜率 {data.get('win_rate', 0)}% | "
+                f"TOP3 {data.get('top3_rate', 0)}% | 平均排名 {data.get('avg_rank', 0)}"
+            ),
+            (
+                f"平均击杀 {data.get('avg_kill', 0)} | 平均 RP {data.get('avg_rp', 0)} | "
+                f"选择率 {data.get('pick_rate', 0)}%"
+            ),
+            f"平均伤害 {data.get('avg_damage', 0)} | 平均 TK {data.get('avg_tk', 0)}",
+        ]
+        builds = data.get("skill_builds") or []
+        if builds:
+            lines.append("推荐技能：" + "；".join(
+                f"{b.get('key', '')} 选择率{b.get('selection_rate', 0)}% 胜率{b.get('win_rate', 0)}%"
+                for b in builds[:3]
+            ))
+        tactical = data.get("tactical_skills") or []
+        if tactical:
+            lines.append("推荐战术：" + "；".join(
+                f"{t.get('name', '')} {t.get('selection_rate', 0)}%"
+                for t in tactical[:3]
+            ))
+        traits = data.get("trait_builds") or []
+        if traits:
+            lines.append("推荐潜能：" + "；".join(
+                f"{t.get('core', {}).get('name', '')} {t.get('selection_rate', 0)}%"
+                for t in traits[:3]
+            ))
+        lines.append("请只根据以上数据做简短分析，不要编造未提供的数据。")
+        return "\n".join(lines)
+
+    def _format_ranking_llm_text(self, data: dict[str, Any], tier_display: str) -> str:
+        ranking = data.get("ranking") or []
+        lines = [
+            f"【永恒轮回角色评级】{tier_display} · 共 {len(ranking)} 项 · "
+            f"样本 {data.get('tier_count', 0)} 场",
+            "按 tierScore 排序，仅列前 15 项：",
+        ]
+        for index, item in enumerate(ranking[:15], start=1):
+            lines.append(
+                f"{index}. {item.get('character_name', '')} "
+                f"[{item.get('tier_badge', '')}] "
+                f"tierScore {item.get('tier_score', 0)} | "
+                f"{item.get('count', 0)}场 | "
+                f"伤害 {item.get('avg_damage', 0)} | "
+                f"RP {item.get('avg_mmr_gain', 0)}"
+            )
+        lines.append("请只根据以上数据做简短分析，不要编造未提供的数据。")
+        return "\n".join(lines)
+
+    @filter.llm_tool(name="er_player_report")
+    async def llm_player_report(
+        self,
+        event: AstrMessageEvent,
+        player: str,
+        season: str = "",
+        mode: str = "",
+        match_count: int = 10,
+    ):
+        """查询永恒轮回玩家战绩并返回文本数据，供模型分析。
+
+        Args:
+            player(string): 玩家昵称
+            season(string): 可选赛季，例如 S10、S11；留空使用当前赛季
+            mode(string): 可选模式：排位、匹配、钴协议、联盟、孤狼、钴联盟；留空为所有模式
+            match_count(number): 最近对局数量，10-20，默认 10
+        """
+        try:
+            season_key = season.strip().upper() or self.default_season
+            resolved_season = self.api.SEASON_ALIASES.get(season_key, season_key)
+            season_display = self._format_season_display(season_key)
+            mode_id, mode_api, mode_label = DEFAULT_MODE_ID, DEFAULT_MODE_API, DEFAULT_MODE_LABEL
+            query_mode_label = "所有模式"
+            mode_key = mode.strip().upper()
+            if mode_key:
+                if mode_key in MODE_KEYWORDS:
+                    mode_id, mode_api, mode_label = MODE_KEYWORDS[mode_key]
+                    query_mode_label = mode_label
+                else:
+                    english_modes = {
+                        "RANK": "排位", "NORMAL": "匹配", "COBALT": "钴协议",
+                        "SQUAD_RUMBLE": "联盟", "LONE_WOLF": "孤狼",
+                        "SQUAD_RUMBLE_COBALT": "钴联盟",
+                    }
+                    if mode_key in english_modes:
+                        mode_id, mode_api, mode_label = MODE_KEYWORDS[english_modes[mode_key]]
+                        query_mode_label = mode_label
+            count = max(10, min(20, int(match_count or 10)))
+            official_uid = None
+            if self.official_api is not None and resolved_season == self.default_season:
+                official_uid = await self._resolve_official_uid(player)
+            result = await asyncio.to_thread(
+                self._do_query_profile_sync,
+                player,
+                resolved_season,
+                count,
+                mode_id,
+                mode_api,
+                mode_label,
+                official_uid,
+                True,
+            )
+            if not isinstance(result, tuple):
+                return f"查询失败：{result}"
+            image_path, data = result
+            await self._send_llm_image(event, image_path)
+            return self._format_profile_llm_text(data, season_display, query_mode_label)
+        except Exception as e:
+            logger.warning(f"[ER LLM] 玩家查询失败: {e}")
+            return f"查询失败：{self._friendly_query_error(str(e))}"
+
+    @filter.llm_tool(name="er_character_report")
+    async def llm_character_report(
+        self,
+        event: AstrMessageEvent,
+        character: str,
+        weapon: str = "",
+        tier: str = "diamond_plus",
+    ):
+        """查询永恒轮回角色数据并返回文本，供模型分析。
+
+        Args:
+            character(string): 角色名或备注
+            weapon(string): 可选武器名；留空使用角色最常用武器
+            tier(string): 段位筛选，默认 diamond_plus
+        """
+        try:
+            tier_map = {
+                "灭钻": "diamond_plus", "灭钻+": "diamond_plus",
+                "星陨": "meteorite_plus", "星陨+": "meteorite_plus",
+                "无瑕": "mithril_plus", "无瑕+": "mithril_plus",
+                "修罗": "asura_plus", "修罗+": "asura_plus",
+                "in1000": "in1000", "前1000": "in1000",
+            }
+            tier_key = tier_map.get(tier.strip(), tier.strip() or "diamond_plus")
+            char_matches = self.assets.find_character_by_name(character)
+            if not char_matches:
+                return f"未找到角色「{character}」。"
+            char_name = char_matches[0].get("name", character)
+            mastery_id = None
+            if weapon.strip():
+                mastery_matches = self.assets.find_mastery_by_name(weapon)
+                if not mastery_matches:
+                    return f"未找到武器「{weapon}」。"
+                mastery_id = mastery_matches[0].get("id")
+
+            def _sync() -> Any:
+                stats_data = _LEADERBOARD_CACHE.get(f"char_stats|{tier_key}")
+                if stats_data is None:
+                    stats_data = self.api.get_character_stats(tier=tier_key)
+                    _LEADERBOARD_CACHE.set(f"char_stats|{tier_key}", stats_data, CACHE.leaderboard_cache_ttl)
+                recommendations = None
+                try:
+                    char_key = char_matches[0].get("key", "")
+                    if char_key:
+                        recommendations = self.api.get_character_recommendations(
+                            char_key, tier=tier_key, weapon=mastery_id,
+                        )
+                except Exception as e:
+                    logger.warning(f"[ER LLM] 角色推荐获取失败: {e}")
+                data = self.mapper.build_character_stats_render_data(
+                    stats_data=stats_data,
+                    character_name=character,
+                    weapon_name=weapon or None,
+                    tier=tier_key,
+                    assets=self.assets,
+                    recommendations=recommendations,
+                )
+                if not data:
+                    return None
+                path = self.renderer.render_character_stats(data)
+                return path, data
+
+            result = await asyncio.to_thread(_sync)
+            if result is None:
+                return f"未找到 {char_name} 在 {tier_key} 的数据。"
+            image_path, data = result
+            await self._send_llm_image(event, image_path)
+            return self._format_character_llm_text(data)
+        except Exception as e:
+            logger.warning(f"[ER LLM] 角色查询失败: {e}")
+            return f"查询失败：{self._friendly_query_error(str(e))}"
+
+    @filter.llm_tool(name="er_character_ranking_report")
+    async def llm_character_ranking_report(
+        self,
+        event: AstrMessageEvent,
+        tier: str = "diamond_plus",
+    ):
+        """查询永恒轮回角色评级排行并返回文本，供模型分析。
+
+        Args:
+            tier(string): 段位筛选，默认 diamond_plus
+        """
+        try:
+            tier_map = {
+                "灭钻": "diamond_plus", "灭钻+": "diamond_plus",
+                "星陨": "meteorite_plus", "星陨+": "meteorite_plus",
+                "无瑕": "mithril_plus", "无瑕+": "mithril_plus",
+                "修罗": "asura_plus", "修罗+": "asura_plus",
+                "in1000": "in1000", "前1000": "in1000",
+            }
+            tier_key = tier_map.get(tier.strip(), tier.strip() or "diamond_plus")
+            tier_display_map = {
+                "diamond_plus": "灭钻+", "meteorite_plus": "星陨+",
+                "mithril_plus": "无瑕+", "asura_plus": "修罗+", "in1000": "in 1000",
+            }
+            tier_display = tier_display_map.get(tier_key, tier_key)
+
+            def _sync() -> Any:
+                stats_data = _LEADERBOARD_CACHE.get(f"char_stats|{tier_key}")
+                if stats_data is None:
+                    stats_data = self.api.get_character_stats(tier=tier_key)
+                    _LEADERBOARD_CACHE.set(f"char_stats|{tier_key}", stats_data, CACHE.leaderboard_cache_ttl)
+                data = self.mapper.build_character_ranking_data(
+                    stats_data=stats_data, assets=self.assets, tier=tier_key,
+                )
+                if not data.get("ranking"):
+                    return None
+                return self.renderer.render_character_ranking(data), data
+
+            result = await asyncio.to_thread(_sync)
+            if result is None:
+                return f"没有找到 {tier_display} 的角色评级数据。"
+            image_path, data = result
+            await self._send_llm_image(event, image_path)
+            return self._format_ranking_llm_text(data, tier_display)
+        except Exception as e:
+            logger.warning(f"[ER LLM] 角色评级查询失败: {e}")
+            return f"查询失败：{self._friendly_query_error(str(e))}"
