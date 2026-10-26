@@ -887,6 +887,7 @@ class ERProfilePlugin(Star):
         mode_label: str = DEFAULT_MODE_LABEL,
         official_uid: Optional[str] = None,
         return_data: bool = False,
+        render_image: bool = True,
     ) -> Any:
         """【在线程池中执行】同步的玩家查询+映射+渲染流程
 
@@ -1042,7 +1043,7 @@ class ERProfilePlugin(Star):
                     first_matches[0]["team_max_damage"] = team_max_damage
 
         # ===== 4. 渲染图片（render内部已有信号量控制并发） =====
-        image_path = self.renderer.render(render_data)
+        image_path = self.renderer.render(render_data) if render_image else ""
         if return_data:
             return image_path, render_data
         return image_path
@@ -2685,4 +2686,343 @@ class ERProfilePlugin(Star):
             return self._format_ranking_llm_text(data, tier_display)
         except Exception as e:
             logger.warning(f"[ER LLM] 角色评级查询失败: {e}")
+            return f"查询失败：{self._friendly_query_error(str(e))}"
+
+    def _resolve_llm_mode(self, mode: str) -> tuple[int, str, str, str]:
+        mode_id, mode_api, mode_label = DEFAULT_MODE_ID, DEFAULT_MODE_API, DEFAULT_MODE_LABEL
+        query_label = "所有模式"
+        key = mode.strip().upper()
+        if key:
+            if key in MODE_KEYWORDS:
+                mode_id, mode_api, mode_label = MODE_KEYWORDS[key]
+                query_label = mode_label
+            else:
+                english = {
+                    "RANK": "排位", "NORMAL": "匹配", "COBALT": "钴协议",
+                    "SQUAD_RUMBLE": "联盟", "LONE_WOLF": "孤狼",
+                    "SQUAD_RUMBLE_COBALT": "钴联盟",
+                }
+                if key in english:
+                    mode_id, mode_api, mode_label = MODE_KEYWORDS[english[key]]
+                    query_label = mode_label
+        return mode_id, mode_api, mode_label, query_label
+
+    def _compact_profile_text(
+        self,
+        data: dict[str, Any],
+        label: str,
+        season_display: str,
+        mode_label: str,
+    ) -> str:
+        p = data.get("player", {}) or {}
+        s = data.get("summary", {}) or {}
+        lines = [
+            f"{label}：{p.get('name', '')} · {season_display} · {mode_label}",
+            f"MMR {p.get('mmr', 0)} | 段位 {p.get('tier_name', '未鉴定')} | 场次 {s.get('play', 0)} | 胜率 {s.get('win_rate', 0)}%",
+            f"TOP2 {s.get('top2_rate', 0)}% | TOP3 {s.get('top3_rate', 0)}% | 平均排名 {s.get('avg_rank', 0)}",
+            f"平均击杀 {s.get('avg_kill', 0)} | 助攻 {s.get('avg_assist', 0)} | TK {s.get('avg_tk', 0)} | 伤害 {s.get('avg_damage', 0)}",
+        ]
+        heroes = data.get("common_heroes") or []
+        if heroes:
+            lines.append("常用英雄：" + "；".join(
+                f"{h.get('character_name', '')} {h.get('play', 0)}场/{h.get('win_rate', 0)}%"
+                for h in heroes[:5]
+            ))
+        return "\n".join(lines)
+
+    @filter.llm_tool(name="er_leaderboard_report")
+    async def llm_leaderboard_report(
+        self,
+        event: AstrMessageEvent,
+        season: str = "",
+    ):
+        """查询永恒轮回排行榜与永恒/半神分数线。
+
+        Args:
+            season(string): 可选赛季，例如 S10；留空使用当前赛季
+        """
+        try:
+            season_key = season.strip().upper() or self.default_season
+            resolved = self.api.SEASON_ALIASES.get(season_key, season_key)
+            season_display = self._format_season_display(season_key)
+            cache_key = f"{resolved}|seoul|SQUAD"
+            data = _LEADERBOARD_CACHE.get(cache_key)
+            if data is None:
+                data = await asyncio.to_thread(
+                    self.api.get_leaderboard,
+                    page=1,
+                    season_key=resolved,
+                    server_name="seoul",
+                    team_mode="SQUAD",
+                )
+                _LEADERBOARD_CACHE.set(cache_key, data, CACHE.leaderboard_cache_ttl)
+            mmr = self.mapper._get_cutoff_mmr_values(data)
+            top = self.mapper._get_cutoff_player_rank(data, limit=10)
+            lines = [
+                f"【永恒轮回排行榜】{season_display} · SQUAD",
+                f"永恒分数线 {mmr.get('Immortal_mmr', 0):,} | 半神分数线 {mmr.get('Titan_mmr', 0):,}",
+            ]
+            for player in top:
+                lines.append(
+                    f"#{player.get('rank', 0)} {player.get('player_name', '')} | "
+                    f"MMR {player.get('mmr', 0)} | 胜率 {player.get('win_rate', 0):.1f}% | "
+                    f"{player.get('games', 0)}场 | 平均排名 {player.get('avg_rank', 0):.1f}"
+                )
+            return "\n".join(lines)
+        except Exception as e:
+            logger.warning(f"[ER LLM] 排行榜查询失败: {e}")
+            return f"查询失败：{self._friendly_query_error(str(e))}"
+
+    @filter.llm_tool(name="er_patch_notes")
+    async def llm_patch_notes(
+        self,
+        event: AstrMessageEvent,
+        page: int = 1,
+        size: int = 5,
+    ):
+        """查询永恒轮回最近的版本更新/热修复公告。
+
+        Args:
+            page(number): 页码，默认 1
+            size(number): 数量，默认 5
+        """
+        try:
+            data = await asyncio.to_thread(
+                self.api.get_patch_notes,
+                page=max(1, int(page or 1)),
+                size=max(1, min(10, int(size or 5))),
+            )
+            notes = data.get("patchNotes") or []
+            if not notes:
+                return "没有找到版本公告。"
+            lines = [f"【永恒轮回版本公告】共 {data.get('count', 0)} 条"]
+            for note in notes:
+                lines.append(
+                    f"- {note.get('patchDate', '')} | {note.get('patchType', '')} | "
+                    f"{note.get('title', '')} | {note.get('href', '')}"
+                )
+            return "\n".join(lines)
+        except Exception as e:
+            logger.warning(f"[ER LLM] 版本公告查询失败: {e}")
+            return f"查询失败：{self._friendly_query_error(str(e))}"
+
+    @filter.llm_tool(name="er_esports_recent")
+    async def llm_esports_recent(
+        self,
+        event: AstrMessageEvent,
+        code: str = "",
+        page: int = 1,
+        size: int = 10,
+    ):
+        """查询近期永恒轮回赛事对局。
+
+        Args:
+            code(string): 可选赛事/阶段代码，例如 0112 表示 ER Masters S12
+            page(number): 页码，默认 1
+            size(number): 数量，默认 10
+        """
+        try:
+            data = await asyncio.to_thread(
+                self.api.get_tournament_recent_games,
+                page=max(1, int(page or 1)),
+                size=max(1, min(20, int(size or 10))),
+                code=code.strip() or None,
+            )
+            infos = data.get("gameInfos") or []
+            if not infos:
+                return "没有找到赛事对局。"
+            lines = [f"【永恒轮回赛事对局】共 {data.get('count', 0)} 场"]
+            for info in infos:
+                created = datetime.fromtimestamp(int(info.get("createdAt", 0)) / 1000)
+                chars = []
+                for game in (info.get("games") or [])[:6]:
+                    name = self.assets.get_character_name(int(game.get("characterNum", 0) or 0))
+                    if name:
+                        chars.append(name)
+                lines.append(
+                    f"- {created.strftime('%Y-%m-%d %H:%M')} | code {info.get('code', '')} | "
+                    f"gameId {info.get('gameId', '')} | 选手角色：{', '.join(chars)}"
+                )
+            lines.append("如需某场详细数据，可调用 er_esports_match 并传入 gameId。")
+            return "\n".join(lines)
+        except Exception as e:
+            logger.warning(f"[ER LLM] 赛事列表查询失败: {e}")
+            return f"查询失败：{self._friendly_query_error(str(e))}"
+
+    @filter.llm_tool(name="er_esports_match")
+    async def llm_esports_match(
+        self,
+        event: AstrMessageEvent,
+        game_id: int,
+    ):
+        """查询一场赛事的队伍得分、选手阵容和技能加点。
+
+        Args:
+            game_id(number): 赛事对局 gameId
+        """
+        try:
+            data = await asyncio.to_thread(self.api.get_tournament_game_detail, int(game_id))
+            scores = data.get("scoreInfos") or []
+            games = data.get("games") or []
+            lines = [f"【赛事对局 {game_id}】"]
+            for score in sorted(scores, key=lambda x: x.get("rankScore", 0), reverse=True)[:8]:
+                lines.append(
+                    f"队伍 {score.get('teamNumber', '')} | 排名分 {score.get('rankScore', 0)} | "
+                    f"击杀分 {score.get('killScore', 0)}"
+                )
+            lines.append("选手数据（按伤害前 12）：")
+            for game in sorted(games, key=lambda x: x.get("damageToPlayer", 0), reverse=True)[:12]:
+                lines.append(
+                    f"- {game.get('nickname', '')} | "
+                    f"{self.assets.get_character_name(int(game.get('characterNum', 0) or 0))} | "
+                    f"排名 #{game.get('gameRank', 0)} | "
+                    f"K/A {game.get('playerKill', 0)}/{game.get('playerAssistant', 0)} | "
+                    f"伤害 {game.get('damageToPlayer', 0)}"
+                )
+            return "\n".join(lines)
+        except Exception as e:
+            logger.warning(f"[ER LLM] 赛事对局查询失败: {e}")
+            return f"查询失败：{self._friendly_query_error(str(e))}"
+
+    @filter.llm_tool(name="er_compare_players")
+    async def llm_compare_players(
+        self,
+        event: AstrMessageEvent,
+        player_a: str,
+        player_b: str,
+        season: str = "",
+        mode: str = "",
+    ):
+        """对比两个永恒轮回玩家的战绩数据。
+
+        Args:
+            player_a(string): 第一个玩家昵称
+            player_b(string): 第二个玩家昵称
+            season(string): 可选赛季，例如 S10；留空使用当前赛季
+            mode(string): 可选模式：排位、匹配、钴协议等；留空为所有模式
+        """
+        try:
+            season_key = season.strip().upper() or self.default_season
+            resolved = self.api.SEASON_ALIASES.get(season_key, season_key)
+            season_display = self._format_season_display(season_key)
+            mode_id, mode_api, mode_label, query_label = self._resolve_llm_mode(mode)
+            results = []
+            for name in (player_a, player_b):
+                result = await asyncio.to_thread(
+                    self._do_query_profile_sync,
+                    name,
+                    resolved,
+                    10,
+                    mode_id,
+                    mode_api,
+                    mode_label,
+                    None,
+                    True,
+                    False,
+                )
+                results.append(result)
+            lines = [f"【玩家对比】{season_display} · {query_label}"]
+            for index, result in enumerate(results):
+                if not isinstance(result, tuple):
+                    return f"查询 {player_a if index == 0 else player_b} 失败。"
+                _, data = result
+                label = "玩家A" if index == 0 else "玩家B"
+                lines.append(self._compact_profile_text(data, label, season_display, query_label))
+                lines.append("")
+            lines.append("请根据以上数据比较两人的段位、稳定性、输出和近期状态，不要编造。")
+            return "\n".join(lines)
+        except Exception as e:
+            logger.warning(f"[ER LLM] 玩家对比失败: {e}")
+            return f"查询失败：{self._friendly_query_error(str(e))}"
+
+    @filter.llm_tool(name="er_match_report")
+    async def llm_match_report(
+        self,
+        event: AstrMessageEvent,
+        player: str,
+        game_id: int,
+        season: str = "",
+    ):
+        """查询某一局的全员详细战报。
+
+        Args:
+            player(string): 要查询的玩家昵称
+            game_id(number): 对局 gameId
+            season(string): 可选赛季，例如 S10；留空使用当前赛季
+        """
+        try:
+            season_key = season.strip().upper() or self.default_season
+            resolved = self.api.SEASON_ALIASES.get(season_key, season_key)
+            season_id = self.mapper.SEASON_ID_MAP.get(resolved)
+            if season_id is None:
+                return f"无法识别赛季 {resolved}。"
+            data = await asyncio.to_thread(
+                self.api.get_match_detail,
+                player,
+                int(season_id),
+                int(game_id),
+            )
+            entries = data.get("matches") or []
+            if not entries:
+                return "没有找到该局数据。"
+            lines = [f"【单局战报】{player} · gameId {game_id} · {season_key}"]
+            entries = sorted(entries, key=lambda e: (int(e.get("teamNumber", 0) or 0), int(e.get("gameRank", 0) or 0)))
+            for entry in entries:
+                lines.append(
+                    f"队伍{entry.get('teamNumber', '')} #{entry.get('gameRank', '')} | "
+                    f"{entry.get('nickname', '')} | "
+                    f"{self.assets.get_character_name(int(entry.get('characterNum', 0) or 0))} | "
+                    f"K/A/D {entry.get('playerKill', 0)}/{entry.get('playerAssistant', 0)}/{entry.get('playerDeaths', 0)} | "
+                    f"伤害 {entry.get('damageToPlayer', 0)}"
+                )
+            return "\n".join(lines)
+        except Exception as e:
+            logger.warning(f"[ER LLM] 单局战报查询失败: {e}")
+            return f"查询失败：{self._friendly_query_error(str(e))}"
+
+    @filter.llm_tool(name="er_character_leaderboard")
+    async def llm_character_leaderboard(
+        self,
+        event: AstrMessageEvent,
+        character: str,
+        season: str = "",
+        sort_type: str = "TIER",
+    ):
+        """查询某个角色的玩家排行榜。
+
+        Args:
+            character(string): 角色名或备注
+            season(string): 可选赛季，例如 S10；留空使用当前赛季
+            sort_type(string): 排序方式 TIER、WIN_RATE、MATCH_COUNT，默认 TIER
+        """
+        try:
+            matches = self.assets.find_character_by_name(character)
+            if not matches:
+                return f"未找到角色「{character}」。"
+            char = matches[0]
+            season_key = season.strip().upper() or self.default_season
+            resolved = self.api.SEASON_ALIASES.get(season_key, season_key)
+            data = await asyncio.to_thread(
+                self.api.get_character_leaderboard,
+                char.get("key", ""),
+                season_key=resolved,
+                team_mode="SQUAD",
+                sort_type=sort_type.strip().upper() or "TIER",
+                page=1,
+            )
+            rankings = data.get("rankings") or []
+            if not rankings:
+                return f"没有找到 {char.get('name', character)} 的排行榜数据。"
+            lines = [f"【角色排行榜】{char.get('name', character)} · {self._format_season_display(season_key)}"]
+            for index, row in enumerate(rankings[:10], start=1):
+                picks = int(row.get("pickCount", 0) or 0)
+                wins = int(row.get("winCount", 0) or 0)
+                lines.append(
+                    f"{index}. {row.get('nickname', '')} | MMR {row.get('mmr', 0)} | "
+                    f"{picks}场 | 胜率 {(wins / picks * 100) if picks else 0:.1f}% | "
+                    f"平均排名 {row.get('avgPlacement', 0):.2f}"
+                )
+            return "\n".join(lines)
+        except Exception as e:
+            logger.warning(f"[ER LLM] 角色排行榜查询失败: {e}")
             return f"查询失败：{self._friendly_query_error(str(e))}"
