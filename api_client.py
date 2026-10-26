@@ -550,6 +550,46 @@ class ERApiClient:
 
         return all_matches
 
+    def get_patch_notes(self, page: int = 1, size: int = 5) -> dict[str, Any]:
+        """Recent Eternal Return patch notes."""
+        return self._get("/patch-notes", params={"page": page, "size": size})
+
+    def get_tournament_recent_games(
+        self,
+        page: int = 1,
+        size: int = 20,
+        code: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Recent esports tournament games, optionally filtered by code prefix."""
+        params: dict[str, Any] = {"page": page, "size": size}
+        if code:
+            params["code"] = code
+        return self._get("/tournament/recent-games", params=params)
+
+    def get_tournament_game_detail(self, game_id: int) -> dict[str, Any]:
+        """Full score/skill/player detail for one tournament game."""
+        return self._get("/tournament/games", params={"id": int(game_id)})
+
+    def get_character_leaderboard(
+        self,
+        character_key: str,
+        season_key: Optional[str] = None,
+        team_mode: str = "SQUAD",
+        sort_type: str = "TIER",
+        page: int = 1,
+    ) -> dict[str, Any]:
+        """Character-specific player leaderboard."""
+        return self._get(
+            f"https://er.dakgg.io/api/v0/leaderboard/characters/{quote(str(character_key), safe='')}",
+            params={
+                "seasonKey": self._resolve_season(season_key),
+                "teamMode": team_mode,
+                "sortType": sort_type,
+                "page": page,
+                "hl": "zh_CN",
+            },
+        )
+
 
 class _TokenBucket:
     """令牌桶限速器：官方 Open API 限制为 1 req/s、瞬时突发 2 个并发"""
