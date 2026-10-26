@@ -598,6 +598,8 @@ class DataMapper:
         return {
             "game_id": match.get("gameId"),
             "rank": int(match.get("gameRank", 0) or 0),
+            # escapeState: 3 表示逃生成功
+            "escaped": int(match.get("escapeState", 0) or 0) == 3,
 
             "character_id": char_id,
             "character_name": self.assets.get_character_name(char_id),
@@ -646,13 +648,30 @@ class DataMapper:
     # ============================================================
 
     def _build_items(self, match: dict[str, Any]) -> list[dict[str, Any]]:
-        items = []
-        for item_id in match.get("equipment", []):
+        equipment = match.get("equipment", [])
+        # 装备完整时为列表（按部位顺序），只装备部分部位时为 {部位下标: 物品ID} 字典
+        if isinstance(equipment, dict):
             try:
+                raw_items = sorted(equipment.items(), key=lambda kv: int(kv[0]))
+            except (TypeError, ValueError):
+                raw_items = list(equipment.items())
+        elif isinstance(equipment, list):
+            raw_items = list(enumerate(equipment))
+        else:
+            raw_items = []
+
+        items = []
+        for slot, item_id in raw_items:
+            try:
+                slot = int(slot)
                 item_id = int(item_id)
-            except Exception:
+            except (TypeError, ValueError):
                 continue
-            items.append(self.assets.build_item_render_data(item_id))
+            if item_id <= 0:
+                continue
+            item = self.assets.build_item_render_data(item_id)
+            item["slot"] = slot
+            items.append(item)
         return items
 
     def _build_traits(self, match: dict[str, Any]) -> list[dict[str, Any]]:
