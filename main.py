@@ -41,6 +41,8 @@ from .qq_group_welcome import (
 )
 from .qq_panel_manager import (
     PanelAPIError,
+    delete_own_panels,
+    delete_panel,
     format_panel_record,
     list_panels,
     sync_panels,
@@ -1569,16 +1571,34 @@ class ERProfilePlugin(Star):
 
     @filter.command("指令面板")
     @_resource_busy_guard
-    async def er_qq_panel(self, event: AstrMessageEvent, action: str = "同步"):
+    async def er_qq_panel(
+        self,
+        event: AstrMessageEvent,
+        action: str = "同步",
+        arg2: str = "",
+    ):
         """
         用法:
-        /指令面板         同步面板（group + c2c，不存在则创建、存在则覆盖更新）
-        /指令面板 同步    同上
-        /指令面板 列表    列出当前已生效的指令面板
+        /指令面板               同步面板（group + c2c，不存在则创建、存在则覆盖更新）
+        /指令面板 同步          同上
+        /指令面板 同步 本群     只让当前群生效（target_type=specific）
+        /指令面板 列表          列出当前已生效的指令面板
+        /指令面板 删除          删除本插件同步出来的面板
+        /指令面板 删除 <id>     按 panel_id 删除指定面板
         """
         action = (action or "同步").strip()
-        if action not in ("同步", "列表"):
-            yield event.plain_result("用法：/指令面板 同步 或 /指令面板 列表")
+        arg2 = (arg2 or "").strip()
+        if action not in ("同步", "列表", "删除"):
+            yield event.plain_result(
+                "用法：/指令面板 同步 [本群]\n"
+                "/指令面板 列表\n"
+                "/指令面板 删除 [panel_id]"
+            )
+            return
+
+        only_this_group = action == "同步" and arg2 in ("本群", "本群生效")
+        if only_this_group and not self._panel_group_openids(event):
+            yield event.plain_result("「本群」只能在 QQ 群里使用喵")
             return
 
         clients = get_qq_official_clients(self.context)
@@ -1594,11 +1614,26 @@ class ERProfilePlugin(Star):
                     client,
                     scopes=("group", "c2c"),
                     items=items,
+                    # 加上「本群」参数时，群面板只对当前群生效
+                    group_openids=self._panel_group_openids(event) if only_this_group else None,
                 )
                 lines = [f"指令面板同步完成喵（共 {len(items)} 项指令）："]
-                for scope, (status, panel_id) in result.items():
-                    lines.append(f"- {scope} [{status}] {panel_id}")
+                for scope, (status, pid) in result.items():
+                    lines.append(f"- {scope} [{status}] {pid}")
                 yield event.plain_result("\n".join(lines))
+            elif action == "删除":
+                if arg2:
+                    await delete_panel(client, arg2)
+                    yield event.plain_result(f"已删除指令面板 {arg2} 喵")
+                else:
+                    removed = await delete_own_panels(client)
+                    if not removed:
+                        yield event.plain_result("没有找到本插件同步的面板喵")
+                    else:
+                        lines = ["已删除以下面板喵："]
+                        for scope, pid in removed:
+                            lines.append(f"- {scope} | {pid}")
+                        yield event.plain_result("\n".join(lines))
             else:
                 lines = ["当前指令面板列表："]
                 for scope in ("group", "c2c"):
@@ -1616,6 +1651,21 @@ class ERProfilePlugin(Star):
             logger.warning(f"[ER面板] 指令面板操作异常: {e}")
             yield event.plain_result("指令面板操作失败喵，请稍后再试~")
 
+    @staticmethod
+    def _panel_group_openids(event: AstrMessageEvent) -> Optional[list[str]]:
+        """在群聊里同步面板时返回当前群 openid，让面板只对该群生效。
+
+        私聊触发时返回 None（面板对全部群/用户生效）。
+        """
+        try:
+            if get_platform_name(event) not in QQ_OFFICIAL_NAMES:
+                return None
+            group_id = getattr(getattr(event, "message_obj", None), "group_id", None)
+            if group_id:
+                return [str(group_id)]
+        except Exception:
+            pass
+        return None
     @filter.command("备注列表")
     @_resource_busy_guard
     async def list_all_aliases(self, event: AstrMessageEvent):
