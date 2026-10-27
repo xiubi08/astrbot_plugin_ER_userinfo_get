@@ -32,6 +32,7 @@ from .platform_compat import QQ_OFFICIAL_NAMES, get_platform_name, get_qq_offici
 from .qq_official_button import (
     available as qq_buttons_available,
     query_result_buttons,
+    send_image_with_buttons,
     send_markdown_with_buttons,
 )
 from .qq_panel_manager import (
@@ -48,6 +49,9 @@ from astrbot.api import logger
 # 注意：所有通过 @filter.command / @filter.regex 注册的消息 handler 都必须加 @_resource_busy_guard，
 # 否则更新资源期间该指令仍会执行。新增消息 handler 时请务必带上该装饰器。
 _RESOURCE_UPDATING_NOTICE = "爱琳正在更新资源喵，请稍等喵~"
+
+# QQ 官方「图文 + 按钮」单条消息的总超时（含素材上传与发送）
+QQ_CARD_TIMEOUT = 45.0
 
 
 def _resource_busy_guard(fn):
@@ -581,8 +585,50 @@ class ERProfilePlugin(Star):
         return last
 
     # =========================
-    # QQ 官方附加模块：查询出图后追加指令按钮
+    # QQ 官方附加模块：图文 + 指令按钮单条消息
     # =========================
+    def _qq_buttons_enabled(self) -> bool:
+        return bool(self.plugin_config and self.plugin_config.get("qq_buttons_enabled", True))
+
+    def _qq_inline_card_enabled(self) -> bool:
+        return bool(self.plugin_config and self.plugin_config.get("qq_inline_card", True))
+
+    async def _send_qq_profile_card(
+        self,
+        event: AstrMessageEvent,
+        image_path: str,
+        player_name: str,
+        query_args: list[str],
+    ) -> bool:
+        """QQ 官方平台：把战绩图与指令按钮合成一条 markdown 图文消息发出。
+
+        返回 True 表示已作为单条消息发送（调用方不要再单独发图片）；
+        非 QQ 平台、开关关闭、素材上传或发送失败都返回 False，由调用方走
+        「图片消息 + 按钮消息」的老路径。
+        """
+        try:
+            if not (self._qq_buttons_enabled() and self._qq_inline_card_enabled()):
+                return False
+            if not qq_buttons_available():
+                return False
+            if get_platform_name(event) not in QQ_OFFICIAL_NAMES:
+                return False
+            prev_cmd, next_cmd = self._season_nav_commands(player_name, query_args)
+            rows = query_result_buttons(player_name, prev_cmd, next_cmd)
+            # 上传素材 + 发送需要网络往返，加超时避免拖住事件循环
+            return bool(
+                await asyncio.wait_for(
+                    send_image_with_buttons(self.context, event, image_path, rows),
+                    timeout=QQ_CARD_TIMEOUT,
+                )
+            )
+        except asyncio.TimeoutError:
+            logger.warning("[ER战绩] 图文消息发送超时（已降级为图片+按钮两条）")
+            return False
+        except Exception as e:
+            logger.warning(f"[ER战绩] 图文消息发送失败（已降级）: {e}")
+            return False
+
     async def _attach_qq_result_buttons(
         self,
         event: AstrMessageEvent,
@@ -591,13 +637,11 @@ class ERProfilePlugin(Star):
     ) -> None:
         """QQ 官方平台：出图后追加「帮助/上一赛季/下一赛季/备注玩家」按钮。
 
+        降级路径专用（图文单条消息发送失败时才会走到这里）：
         非 QQ 平台、开关关闭或发送失败均自动忽略，绝不影响主查询结果。
         """
         try:
-            if not (
-                self.plugin_config
-                and self.plugin_config.get("qq_buttons_enabled", True)
-            ):
+            if not self._qq_buttons_enabled():
                 return
             if not qq_buttons_available():
                 return
@@ -736,8 +780,9 @@ class ERProfilePlugin(Star):
             yield event.plain_result(
                 f"正在查询 {player_name} 的 {season_display} 赛季 {query_mode_label}最近 {match_count} 场战绩喵"
             )
-            yield event.image_result(cached_image)
-            await self._attach_qq_result_buttons(event, player_name, parts[2:])
+            if not await self._send_qq_profile_card(event, cached_image, player_name, parts[2:]):
+                yield event.image_result(cached_image)
+                await self._attach_qq_result_buttons(event, player_name, parts[2:])
             return
 
         # ------ 查询去重：相同参数正在处理时，等待先发起的查询结果 ------
@@ -781,7 +826,8 @@ class ERProfilePlugin(Star):
             # 等待 pending 查询结果（阻塞等待放到线程，避免阻塞事件循环）
             signaled = await asyncio.to_thread(wait_evt.wait, CACHE.pending_wait_timeout)
             if signaled and pending.get("result") is not None and Path(pending["result"]).exists():
-                yield event.image_result(pending["result"])
+                if not await self._send_qq_profile_card(event, pending["result"], player_name, parts[2:]):
+                    yield event.image_result(pending["result"])
                 return
             # 超时或失败，走正常查询流程（自己再查一次）
 
@@ -855,8 +901,9 @@ class ERProfilePlugin(Star):
             except LockTimeoutError as e:
                 logger.warning(f"[ER战绩] 通知 pending(ok) 获取锁超时: {e}")
 
-            yield event.image_result(image_path)
-            await self._attach_qq_result_buttons(event, player_name, parts[2:])
+            if not await self._send_qq_profile_card(event, image_path, player_name, parts[2:]):
+                yield event.image_result(image_path)
+                await self._attach_qq_result_buttons(event, player_name, parts[2:])
 
         except Exception as e:
             # 通知等待中的请求：失败
@@ -1317,6 +1364,67 @@ class ERProfilePlugin(Star):
 
         return profile_data
 
+    # =========================
+    # 排行榜文本排版
+    # =========================
+    # 名次徽章：前 3 名用奖牌，4~5 名用数字键帽（避免行首 "4." 被 markdown 当成有序列表）
+    _RANK_BADGES = ("🥇", "🥈", "🥉", "4️⃣", "5️⃣")
+
+    @staticmethod
+    def _md_escape(text: str) -> str:
+        """转义 markdown 元字符。
+
+        QQ 官方适配器会把纯文本当成 markdown 发送（msg_type=2），
+        不转义时玩家名里的 * _ ~ ` 会变成斜体/删除线，行首 # 更会变成大标题。
+        """
+        out = text.replace("\\", "\\\\")
+        for ch in ("*", "_", "~", "`", "[", "]", "#", ">"):
+            out = out.replace(ch, "\\" + ch)
+        return out
+
+    def _format_leaderboard_text(
+        self,
+        mmr_values: dict[str, Any],
+        top_players: list[dict[str, Any]],
+        season_key: str,
+    ) -> str:
+        """把排行榜数据排成便于手机阅读的多行文本（不含 markdown 标题语法）。
+
+        每个玩家占两行：名次 + 玩家名 / 数据摘要；玩家之间空一行，
+        避免原来单行过长在手机上换行错乱，也避免用空格强行对齐（比例字体对不齐）。
+        """
+        season_display = self._format_season_display(season_key)
+        immortal = int(mmr_values.get("Immortal_mmr", 0) or 0)
+        titan = int(mmr_values.get("Titan_mmr", 0) or 0)
+
+        lines = [
+            f"🏆 排行榜　{season_display} · 首尔服 · 四排",
+            "",
+            f"永恒分数线　{immortal:,} MMR",
+            f"半神分数线　{titan:,} MMR",
+        ]
+        if not top_players:
+            lines += ["", "暂无排行榜数据"]
+            return "\n".join(lines)
+
+        lines += ["", "───── 前 5 名 ─────"]
+        for idx, player in enumerate(top_players, start=1):
+            badge = (
+                self._RANK_BADGES[idx - 1]
+                if idx <= len(self._RANK_BADGES)
+                else f"No.{int(player.get('rank') or idx)}"
+            )
+            name = str(player.get("player_name", "") or "未知玩家")
+            lines.append("")
+            lines.append(f"{badge} {name}")
+            lines.append(
+                f"{int(player.get('mmr') or 0):,} MMR · "
+                f"胜率 {float(player.get('win_rate') or 0):.1f}% · "
+                f"{int(player.get('games') or 0)} 场 · "
+                f"均名 {float(player.get('avg_rank') or 0):.1f}"
+            )
+        return "\n".join(lines)
+
     @filter.regex(r"^(永恒多少分|半神多少分|排行榜)\s*$|^(永恒多少分|半神多少分|排行榜)\s+.+$")
     @_resource_busy_guard
     async def er_leaderboard(
@@ -1358,16 +1466,10 @@ class ERProfilePlugin(Star):
             mmr_values = self.mapper._get_cutoff_mmr_values(leaderboard_data)
             top_players = self.mapper._get_cutoff_player_rank(leaderboard_data, limit=5)
 
-            result_text = f"永恒分数线: {mmr_values.get('Immortal_mmr', 0):,} | 半神分数线: {mmr_values.get('Titan_mmr', 0):,}\n\n"
-
-            if top_players:
-                result_text += "排名前5玩家:\n"
-                for i, player in enumerate(top_players):
-                    if i > 0:
-                        result_text += "─" * 30 + "\n"
-                    result_text += f"#{player['rank']:2d} {player['player_name']:<15} MMR: {player['mmr']:>6,} 胜率: {player['win_rate']:>5.1f}% ({player['games']:>2}场) 平均排名: #{player['avg_rank']:.1f}\n"
-            else:
-                result_text += "暂无排行榜数据\n"
+            result_text = self._format_leaderboard_text(mmr_values, top_players, season_key)
+            if get_platform_name(event) in QQ_OFFICIAL_NAMES:
+                # QQ 侧纯文本按 markdown 渲染，转义后玩家名不会被当成格式
+                result_text = self._md_escape(result_text)
             yield event.plain_result(result_text)
 
         except Exception as e:
