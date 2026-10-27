@@ -35,6 +35,10 @@ from .qq_official_button import (
     send_image_with_buttons,
     send_markdown_with_buttons,
 )
+from .qq_group_welcome import (
+    install_hook as qq_welcome_install_hook,
+    send_group_welcome,
+)
 from .qq_panel_manager import (
     PanelAPIError,
     format_panel_record,
@@ -213,6 +217,9 @@ class ERProfilePlugin(Star):
         # 插件配置（_conf_schema.json）：QQ 按钮等附加模块开关读取于此
         self.plugin_config = config or {}
 
+        # QQ 官方入群欢迎：已挂载钩子的客户端 id 集合（按实例去重）
+        self._qq_welcome_hooked: set[int] = set()
+
         # ===== 路径 =====
         self.plugin_dir = Path(__file__).resolve().parent
         self.data_dir = StarTools.get_data_dir("astrbot_plugin_er_profile")
@@ -264,6 +271,8 @@ class ERProfilePlugin(Star):
         # 先用兜底赛季，真实当前赛季由后台线程解析后覆盖（构造函数内禁止同步网络请求）
         self.default_season = QUERY.fallback_season
         self._start_initial_network_tasks()
+        # QQ 官方：给 botpy 客户端挂载入群欢迎钩子（平台可能晚于插件就绪，后台重试）
+        self._start_qq_welcome_hook_task()
 
     def _start_initial_network_tasks(self) -> None:
         """后台完成启动阶段的网络初始化（网络时间同步 + 当前赛季解析）。
@@ -585,6 +594,72 @@ class ERProfilePlugin(Star):
         return last
 
     # =========================
+    # QQ 官方：入群欢迎（GROUP_ADD_ROBOT 事件被动回复）
+    # =========================
+    def _qq_welcome_enabled(self) -> bool:
+        return bool(self.plugin_config and self.plugin_config.get("qq_group_welcome", True))
+
+    def _qq_welcome_handler(self, client: Any):
+        """构造 botpy 入群事件处理器（绑定到具体客户端实例）。"""
+
+        async def _handler(event: Any) -> None:
+            try:
+                await self._on_group_add_robot(client, event)
+            except Exception as e:
+                logger.warning(f"[ER欢迎] 入群欢迎处理异常（已忽略）: {e}")
+
+        # 标记来源：插件重载时据此替换旧实例的处理器
+        _handler._er_welcome_handler = True  # type: ignore[attr-defined]
+        return _handler
+
+    async def _on_group_add_robot(self, client: Any, event: Any) -> None:
+        """机器人被拉进群：发一条图文欢迎（不占用主动消息配额）。"""
+        welcome_img = self.plugin_dir / "data" / "images" / "er_welcome.jpg"
+        await send_group_welcome(
+            client,
+            event,
+            welcome_img if welcome_img.is_file() else None,
+        )
+
+    def _install_qq_welcome_hooks(self) -> int:
+        """给所有 QQ 官方客户端挂载 on_group_add_robot，返回本次新挂载数量。"""
+        if not self._qq_welcome_enabled():
+            return 0
+        try:
+            clients = get_qq_official_clients(self.context)
+        except Exception:
+            return 0
+        installed = 0
+        for client in clients:
+            if id(client) in self._qq_welcome_hooked:
+                continue
+            if getattr(client, "on_group_add_robot", None) is not None:
+                # 已有处理器（插件重载残留等），标记后不再处理
+                self._qq_welcome_hooked.add(id(client))
+                continue
+            if qq_welcome_install_hook(client, self._qq_welcome_handler(client)):
+                self._qq_welcome_hooked.add(id(client))
+                installed += 1
+                logger.info("[ER欢迎] 已挂载 QQ 官方入群欢迎钩子")
+        return installed
+
+    def _start_qq_welcome_hook_task(self) -> None:
+        """后台重试挂载钩子：平台实例可能晚于插件初始化就绪。"""
+
+        def _worker() -> None:
+            for _ in range(24):
+                try:
+                    if self._install_qq_welcome_hooks():
+                        return
+                    if self._qq_welcome_hooked:
+                        return
+                except Exception as e:
+                    logger.debug(f"[ER欢迎] 挂载入群欢迎钩子重试失败: {e}")
+                time.sleep(5)
+
+        threading.Thread(target=_worker, name="ER_qq_welcome_hook", daemon=True).start()
+
+    # =========================
     # QQ 官方附加模块：图文 + 指令按钮单条消息
     # =========================
     def _qq_buttons_enabled(self) -> bool:
@@ -613,6 +688,8 @@ class ERProfilePlugin(Star):
                 return False
             if get_platform_name(event) not in QQ_OFFICIAL_NAMES:
                 return False
+            # 平台可能是在插件加载后才添加的，这里顺手补挂入群欢迎钩子（已挂则直接返回）
+            self._install_qq_welcome_hooks()
             prev_cmd, next_cmd = self._season_nav_commands(player_name, query_args)
             rows = query_result_buttons(player_name, prev_cmd, next_cmd)
             # 上传素材 + 发送需要网络往返，加超时避免拖住事件循环
