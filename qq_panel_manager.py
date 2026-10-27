@@ -1,15 +1,21 @@
 """QQ 官方指令面板管理（附加模块，不修改任何现有代码）。
 
-通过官方 OpenAPI 查询 / 创建 / 修改指令面板：
-- POST /v2/panels            创建面板
-- GET  /v2/panels            查询面板列表
-- GET  /v2/panels/{panel_id} 查询面板详情
-- PUT  /v2/panels/{panel_id} 修改面板（覆盖元素与备注，不影响已关联对象）
+通过官方 OpenAPI 查询 / 创建 / 修改 / 删除指令面板（见 机器人 > 自定义菜单与指令面板）：
+- POST   /v2/panels                  创建面板
+- GET    /v2/panels                  查询面板列表
+- GET    /v2/panels/{panel_id}       查询面板详情
+- PUT    /v2/panels/{panel_id}       修改面板（覆盖元素与备注，不影响已关联对象）
+- DELETE /v2/panels/{panel_id}       删除面板（释放 20 个配额）
+- PUT    /v2/panels/{panel_id}/target 修改生效范围（全量 / 指定用户、指定群）
+
+域名：官方 20260810 起统一为 api.bot.qq.com，旧域名 api.sgroup.qq.com 作为回退
+（仅网络层失败才换域名，业务错误码直接抛出）。
 
 鉴权：AstrBot 创建 botpy 客户端时不传 appid/secret（client.api._token 为 None），
 因此从适配器实例（client.platform.appid / client.platform.secret）取 appId + clientSecret，
 调用官方接口 https://bots.qq.com/app/getAppAccessToken 换取 access_token（带本地缓存）。
-上限约束：每机器人最多 20 个面板，每面板最多 20 个元素，操作接口 10 QPM。
+上限约束：每机器人最多 20 个面板，每面板最多 20 个元素，操作接口 10 QPM，
+元素 name ≤14 字符（约 7 汉字）、desc ≤30 字符（约 15 汉字）。
 """
 from __future__ import annotations
 
@@ -27,10 +33,14 @@ try:
 except Exception:
     _HAS_AIOHTTP = False
 
-# 面板备注标记：sync_panels 用它识别「属于本插件」的面板，避免重复创建
+# 指令面板备注标记：sync_panels 用它识别「属于本插件」的面板，避免重复创建
 PANEL_REMARK = "ER战绩查询插件自动同步面板"
 
-BASE_URL = "https://api.sgroup.qq.com"
+# 接口域名：官方 20260810 起统一为 api.bot.qq.com，旧域名保留为回退
+BASE_URLS = ("https://api.bot.qq.com", "https://api.sgroup.qq.com")
+
+# 上次调用成功的域名（优先复用，避免每次都先撞一次失败）
+_ACTIVE_BASE: Optional[str] = None
 
 TIMEOUT_SECONDS = 30
 
@@ -119,18 +129,16 @@ async def _build_headers(client: Any) -> dict[str, str]:
     }
 
 
-async def _request(
-    client: Any,
+async def _request_once(
+    base: str,
+    headers: dict[str, str],
     method: str,
     path: str,
-    query: Optional[dict] = None,
-    body: Optional[dict] = None,
+    query: Optional[dict],
+    body: Optional[dict],
 ) -> dict:
-    """发起带 QQBot 鉴权的请求；非 code=0 响应抛 PanelAPIError。"""
-    if not _HAS_AIOHTTP:
-        raise PanelAPIError(message="环境缺少 aiohttp，无法调用指令面板 API")
-    headers = await _build_headers(client)
-    url = BASE_URL + path
+    """对单个域名发起一次请求；网络层异常转为 code=None 的 PanelAPIError。"""
+    url = base + path
     try:
         async with aiohttp.ClientSession() as session:
             async with session.request(
@@ -144,9 +152,10 @@ async def _request(
                 try:
                     data = await resp.json()
                 except Exception:
-                    data = {"code": -1, "message": f"HTTP {resp.status}"}
+                    # 非 JSON 响应（404 HTML 等）按网络层错误处理，允许换域名重试
+                    raise PanelAPIError(message=f"HTTP {resp.status} {path}") from None
     except Exception as e:
-        logger.warning(f"[ER面板] 请求失败 {method} {path}: {e}")
+        logger.warning(f"[ER面板] 请求失败 {base}{path}: {e}")
         raise PanelAPIError(message=str(e)) from e
     if isinstance(data, dict) and data.get("code") not in (None, 0):
         message = str(data.get("message", ""))
@@ -157,6 +166,52 @@ async def _request(
             message=message,
         )
     return data
+
+
+def _base_candidates() -> tuple[str, ...]:
+    """优先使用上次成功的域名，其余作为回退。"""
+    if _ACTIVE_BASE and _ACTIVE_BASE in BASE_URLS:
+        return (_ACTIVE_BASE,) + tuple(b for b in BASE_URLS if b != _ACTIVE_BASE)
+    return BASE_URLS
+
+
+def _remember_base(base: str) -> None:
+    global _ACTIVE_BASE
+    if _ACTIVE_BASE != base:
+        _ACTIVE_BASE = base
+        logger.info(f"[ER面板] 指令面板接口域名已切换为 {base}")
+
+
+async def _request(
+    client: Any,
+    method: str,
+    path: str,
+    query: Optional[dict] = None,
+    body: Optional[dict] = None,
+) -> dict:
+    """发起带 QQBot 鉴权的请求；非 code=0 响应抛 PanelAPIError。
+
+    官方已于 20260810 把接口域名统一为 api.bot.qq.com；旧域名仍作为回退，
+    只有网络层失败才换域名重试，业务错误码（服务端已响应）直接抛出。
+    """
+    if not _HAS_AIOHTTP:
+        raise PanelAPIError(message="环境缺少 aiohttp，无法调用指令面板 API")
+    headers = await _build_headers(client)
+    last_error: Optional[PanelAPIError] = None
+    for base in _base_candidates():
+        try:
+            data = await _request_once(base, headers, method, path, query, body)
+        except PanelAPIError as e:
+            if e.code is not None:
+                # 服务端已响应（业务错误），说明域名可用，不必换域名
+                _remember_base(base)
+                raise
+            last_error = e
+            continue
+        _remember_base(base)
+        return data
+    assert last_error is not None
+    raise last_error
 
 
 async def list_panels(client: Any, scope: str, limit: int = 50) -> list[dict]:
@@ -198,34 +253,95 @@ async def update_panel(client: Any, panel_id: str, panel: dict) -> int:
     return int(data.get("version", 0))
 
 
+async def delete_panel(client: Any, panel_id: str) -> dict:
+    """删除指令面板（释放 20 个面板配额）。"""
+    return await _request(client, "DELETE", f"/v2/panels/{panel_id}")
+
+
+async def update_panel_target(
+    client: Any,
+    panel_id: str,
+    target_type: str = "all",
+    user_openids: Optional[list[str]] = None,
+    group_openids: Optional[list[str]] = None,
+) -> dict:
+    """修改指令面板的生效范围（全量 / 指定用户、指定群）。
+
+    注意：target_type=all 是全局配置，不能带关联对象；specific 最多各 20 个。
+    """
+    body: dict[str, Any] = {"target_type": target_type}
+    if target_type == "specific":
+        if user_openids:
+            body["user_openids"] = list(user_openids)[:20]
+        if group_openids:
+            body["group_openids"] = list(group_openids)[:20]
+    return await _request(client, "PUT", f"/v2/panels/{panel_id}/target", body=body)
+
+
 async def sync_panels(
     client: Any,
     scopes: tuple[str, ...] = ("group", "c2c"),
     items: Optional[list[dict]] = None,
     remark: str = PANEL_REMARK,
+    group_openids: Optional[list[str]] = None,
 ) -> dict[str, tuple[str, str]]:
     """把指令面板同步到指定场景（不存在则创建，已存在则覆盖更新）。
+
+    group_openids 非空时：group 场景的面板改为「仅这些群生效」（target_type=specific），
+    已存在的面板会额外调用修改关联对象接口。
 
     返回 {scope: (created|updated, panel_id)}。
     """
     items = items or []
     results: dict[str, tuple[str, str]] = {}
     for scope in scopes:
+        target_type = "specific" if (scope == "group" and group_openids) else "all"
         records = await list_panels(client, scope)
         mine = [r for r in records if r.get("panel", {}).get("remark") == remark]
         if mine:
-            panel_id = mine[0]["panel_id"]
+            panel_id = str(mine[0]["panel_id"])
             await update_panel(client, panel_id, {"items": items, "remark": remark})
+            if target_type == "specific":
+                try:
+                    await update_panel_target(
+                        client, panel_id, target_type, group_openids=group_openids
+                    )
+                except PanelAPIError as e:
+                    logger.warning(f"[ER面板] 修改面板 {panel_id} 生效范围失败: {e}")
             results[scope] = ("updated", panel_id)
         else:
             panel_id = await create_panel(
                 client,
                 scope,
                 {"items": items, "remark": remark},
-                target_type="all",
+                target_type=target_type,
+                group_openids=group_openids if target_type == "specific" else None,
             )
             results[scope] = ("created", panel_id)
     return results
+
+
+async def delete_own_panels(
+    client: Any,
+    scopes: tuple[str, ...] = ("group", "c2c"),
+    remark: str = PANEL_REMARK,
+) -> list[tuple[str, str]]:
+    """删除本插件同步出来的面板（按 remark 识别），返回 [(scope, panel_id)]。"""
+    removed: list[tuple[str, str]] = []
+    for scope in scopes:
+        records = await list_panels(client, scope)
+        for record in records:
+            if record.get("panel", {}).get("remark") != remark:
+                continue
+            panel_id = str(record.get("panel_id", ""))
+            if not panel_id:
+                continue
+            try:
+                await delete_panel(client, panel_id)
+                removed.append((scope, panel_id))
+            except PanelAPIError as e:
+                logger.warning(f"[ER面板] 删除面板 {panel_id} 失败: {e}")
+    return removed
 
 
 def format_panel_record(record: dict) -> str:
@@ -241,13 +357,17 @@ def format_panel_record(record: dict) -> str:
 
 
 __all__ = [
+    "BASE_URLS",
     "PANEL_REMARK",
     "PanelAPIError",
     "create_panel",
+    "delete_own_panels",
+    "delete_panel",
     "format_panel_record",
     "get_panel",
     "get_qq_official_clients",
     "list_panels",
     "sync_panels",
     "update_panel",
+    "update_panel_target",
 ]

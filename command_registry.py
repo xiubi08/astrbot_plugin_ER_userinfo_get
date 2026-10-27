@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -127,11 +128,28 @@ def qq_panel_entries(limit: int = 12) -> list[CommandSpec]:
     return picked
 
 
+def clip_display(text: str, limit: int) -> str:
+    """按「显示宽度」截断：中文/全角算 2，ASCII 算 1。
+
+    官方限制是字符数（name ≤14 字符≈7 个汉字、desc ≤30 字符≈15 个汉字），
+    直接用 len() 截断会让英文指令名只能放一半长度。
+    """
+    out: list[str] = []
+    width = 0
+    for ch in text:
+        w = 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+        if width + w > limit:
+            break
+        out.append(ch)
+        width += w
+    return "".join(out)
+
+
 def to_panel_items(limit: int = 12) -> list[dict]:
     """把指令登记表转成 QQ 指令面板 PanelItem 结构。
 
-    约束：name ≤ 14 字符（约 7 个汉字）、desc ≤ 30 字符（约 15 个汉字），
-    超限会被服务端以 40030013「超出数量限制」拒绝。
+    约束：name ≤14 字符（约 7 个汉字）、desc ≤30 字符（约 15 个汉字），
+    按显示宽度截断；超限会被服务端以 40030013「超出数量限制」拒绝。
     type=command 时点击后 name 会填入聊天输入框（AstrBot 唤醒前缀会自动剥离）。
     """
     limit = min(limit, 20)  # 单个面板最多 20 个元素
@@ -141,8 +159,8 @@ def to_panel_items(limit: int = 12) -> list[dict]:
         items.append(
             {
                 "type": "command",
-                "name": (spec.qq_label or spec.name)[:7],
-                "desc": desc[:15],
+                "name": clip_display(spec.qq_label or spec.name, 14),
+                "desc": clip_display(desc, 30),
                 "only_admin": bool(spec.admin_only),
             }
         )
