@@ -1601,7 +1601,13 @@ class ERProfilePlugin(Star):
             yield event.plain_result("「本群」只能在 QQ 群里使用喵")
             return
 
-        clients = get_qq_official_clients(self.context)
+        # 必须用「触发本条消息的那个机器人」的客户端：多机器人配置下，
+        # 用错客户端会把面板建到另一个 appid 上（客户端里看不到）
+        try:
+            event_platform_id = event.get_platform_id()
+        except Exception:
+            event_platform_id = ""
+        clients = get_qq_official_clients(self.context, prefer_id=event_platform_id)
         if not clients:
             yield event.plain_result("当前未检测到 QQ 官方机器人平台，无法管理指令面板喵")
             return
@@ -1635,7 +1641,7 @@ class ERProfilePlugin(Star):
                             lines.append(f"- {scope} | {pid}")
                         yield event.plain_result("\n".join(lines))
             else:
-                lines = ["当前指令面板列表："]
+                lines = [f"当前指令面板列表（bot: {event_platform_id or '未知'}）："]
                 for scope in ("group", "c2c"):
                     records = await list_panels(client, scope)
                     if not records:
