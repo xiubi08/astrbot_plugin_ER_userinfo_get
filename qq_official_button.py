@@ -2,18 +2,22 @@
 
 - 通过 context.platform_manager 遍历平台实例，get_client() 取 botpy 客户端
 - 键盘按钮 action.type=2（指令按钮）：点击自动把 data 填入输入框，enter=true 直接发送
+  （注意：官方限制 enter 仅单聊生效，群聊里点击只填入输入框）
+- send_image_with_buttons：图片上传为 qqbot-media:// 素材后内嵌进 markdown，
+  与键盘一起作为单条「图文 + 按钮」消息发送
 - 全程 try/except 兜底：任何失败返回 False，由调用方降级（主结果消息不受影响）
 """
 from __future__ import annotations
 
 import random
-from typing import Any
+from typing import Any, Optional
 
 from .platform_compat import (
     QQ_OFFICIAL_NAMES,
     get_platform_name,
     get_qq_official_clients,
 )
+from .qq_media_image import build_image_markdown, upload_image
 
 from astrbot.api import logger
 
@@ -124,13 +128,13 @@ def query_result_buttons(
     return [row]
 
 
-async def send_markdown_with_buttons(
+async def _post_markdown(
     context: Any,
     event: Any,
-    content: str,
+    markdown: dict,
     rows: list[list[Any]],
 ) -> bool:
-    """向 QQ 官方平台发送一条 Markdown + 指令按钮消息。
+    """把 markdown 载荷与键盘一起作为单条消息发送（msg_type=2）。
 
     仅对 QQ 官方平台生效；非 QQ 平台、无客户端、发送失败均返回 False（调用方自行降级）。
     作为被动回复发送（带 msg_id + 随机 msg_seq），避免占用主动消息频次配额。
@@ -152,7 +156,6 @@ async def send_markdown_with_buttons(
     if api is None:
         return False
 
-    markdown = build_markdown(content if content else "\u200B")  # 空内容用零宽字符占位，避免被服务端拒绝
     keyboard = build_keyboard(rows)
     mtype = _msg_type(event)
     # 被动回复：带上用户消息 msg_id + 随机 msg_seq，避免重复发送被拒
@@ -200,3 +203,62 @@ async def send_markdown_with_buttons(
         return False
     logger.info("[ER按钮] QQ 官方按钮消息已发送")
     return True
+
+
+async def send_markdown_with_buttons(
+    context: Any,
+    event: Any,
+    content: str,
+    rows: list[list[Any]],
+) -> bool:
+    """向 QQ 官方平台发送一条 Markdown + 指令按钮消息（单条）。
+
+    content 为空时用零宽字符占位，避免被服务端拒绝。
+    """
+    return await _post_markdown(
+        context,
+        event,
+        build_markdown(content if content else "\u200B"),
+        rows,
+    )
+
+
+async def send_image_with_buttons(
+    context: Any,
+    event: Any,
+    image_path: str,
+    rows: list[list[Any]],
+    alt: str = "战绩",
+    max_width: int = 720,
+) -> bool:
+    """发送「图片 + 指令按钮」同在一条的图文消息（msg_type=2）。
+
+    图片先上传为 qqbot-media:// 素材，再以 markdown 内嵌图片的形式与键盘一起发出。
+    非 QQ 平台、无 botpy、上传失败、发送失败均返回 False，由调用方降级为
+    「图片消息 + 按钮消息」两条的老路径。
+    """
+    if not _HAS_BOTPY:
+        return False
+    if get_platform_name(event) not in QQ_OFFICIAL_NAMES:
+        return False
+    try:
+        platform_id = event.get_platform_id()
+    except Exception:
+        platform_id = ""
+    clients = get_qq_official_clients(context, prefer_id=platform_id)
+    if not clients:
+        logger.warning("[ER图文] 未找到 QQ 官方平台客户端，跳过图文消息")
+        return False
+    try:
+        url = await upload_image(clients[0], image_path)
+        content = build_image_markdown(url, image_path, alt=alt, max_width=max_width)
+    except Exception as e:
+        logger.warning(f"[ER图文] 战绩图上传素材失败，降级为图片消息: {e}")
+        return False
+    # force_verify_image_resource：图片转存失败时直接报错，避免发出没图的空卡片后误判成功
+    return await _post_markdown(
+        context,
+        event,
+        {"content": content, "force_verify_image_resource": True},
+        rows,
+    )
