@@ -1398,7 +1398,7 @@ class ERProfilePlugin(Star):
         titan = int(mmr_values.get("Titan_mmr", 0) or 0)
 
         lines = [
-            f"🏆 排行榜　{season_display} · 首尔服 · 四排",
+            f"🏆 排行榜　{season_display}",
             "",
             f"永恒分数线　{immortal:,} MMR",
             f"半神分数线　{titan:,} MMR",
