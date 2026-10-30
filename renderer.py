@@ -7,9 +7,19 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, List, Optional
 from concurrent.futures import ThreadPoolExecutor
-from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageOps
 
 from .config import RENDER, LOCK
+from .render_theme import (
+    ThemeStyle,
+    blend_at,
+    border_layer,
+    build_canvas,
+    glow_layer,
+    resolve_theme,
+    rounded_gradient,
+    shadow_layer,
+)
 
 from astrbot.api import logger
 
@@ -129,6 +139,22 @@ class ERRenderer:
         # 淡粉边框
         self.pink_border = RENDER.pink_border
 
+
+        # ===== 主题层：配色 / 光效全部由 RENDER.theme 决定，布局坐标不动 =====
+        self.style: ThemeStyle = resolve_theme(getattr(RENDER, "theme", "legacy"))
+        if not self.style.legacy:
+            # 把旧代码里直接引用 self.xxx 的颜色指向主题色，避免逐行改调用点
+            self.text = self.style.text
+            self.sub_text = self.style.sub_text
+            self.red = self.style.red
+            self.blue = self.style.blue
+            self.gold = self.style.gold
+            self.bg = self.style.bg
+            self.card = self.style.card_fill[:3]
+            self.card_2 = self.style.inner_card_fill[:3]
+            self.pink_border = self.style.card_border[:3]
+            self.gray_line = self.style.divider
+
     # =========================
     # 对外入口
     # =========================
@@ -160,25 +186,30 @@ class ERRenderer:
 
         heroes = data.get("common_heroes", [])
         hero_count = len(heroes)
-        heroes_block_h = 48 + hero_count * 92 + 20 if hero_count > 0 else 120
+        heroes_block_h = self._common_heroes_h(hero_count)
 
         FOOTER_H = RENDER.footer_height
 
+        # 卡片之间用更紧凑的主题间距（统计/总览区更贴）
+        gap = int(getattr(self.style, "card_gap", 0) or self.PADDING)
+        # 总览卡片高度/它与统计卡片之间的间距都可按主题覆盖
+        hdr_h = int(getattr(self.style, "header_h", 0) or self.HEADER_H)
+        gap_head = int(getattr(self.style, "header_gap", 0) or gap)
         total_h = (
             self.PADDING
-            + self.HEADER_H
-            + self.PADDING
+            + hdr_h
+            + gap_head
             + self.SUMMARY_H
-            + self.PADDING
+            + gap
             + heroes_block_h
-            + self.PADDING
+            + gap
             + match_count * self.MATCH_H
             + detail_h
             + self.PADDING
             + FOOTER_H
         )
 
-        img = Image.new("RGBA", (self.W, total_h), self.bg + (255,))
+        img = self._new_canvas(total_h)
         draw = ImageDraw.Draw(img)
 
         mode_label = data.get("mode_label", "")
@@ -186,10 +217,10 @@ class ERRenderer:
         # ========= 阶段1：绘制所有卡片填充（最底层） =========
         y_positions = {
             "header": self.PADDING,
-            "summary": self.PADDING + self.HEADER_H + self.PADDING,
-            "common_heroes": self.PADDING + self.HEADER_H + self.PADDING + self.SUMMARY_H + self.PADDING,
+            "summary": self.PADDING + hdr_h + gap_head,
+            "common_heroes": self.PADDING + hdr_h + gap_head + self.SUMMARY_H + gap,
         }
-        y_positions["matches"] = y_positions["common_heroes"] + heroes_block_h + self.PADDING
+        y_positions["matches"] = y_positions["common_heroes"] + heroes_block_h + gap
 
         future_header = _DRAWING_POOL.submit(
             self._draw_header, img, draw, data.get("player", {}), y_positions["header"], phase="fill"
@@ -263,6 +294,7 @@ class ERRenderer:
 
         # ========= 阶段5：保存图片 =========
         output_path = self.output_dir / f"er_profile_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}.png"
+        img = self._finish_canvas(img)
         img.convert("RGB").save(output_path, "PNG", optimize=False)
         
         return str(output_path)
@@ -358,10 +390,41 @@ class ERRenderer:
     # =========================
     # 顶部
     # =========================
+    def _draw_chart_panel(self, img: Image.Image, x: int, y: int, w: int, h: int) -> None:
+        """折线图底板：白色柔光面板，让曲线从卡片底上"浮"起来。"""
+        st = self.style
+        top = getattr(st, "chart_panel", None)
+        if top is None:
+            return
+        bottom = getattr(st, "chart_panel2", None) or top
+        radius = int(getattr(st, "chart_radius", 16))
+        sprite = rounded_gradient(w, h, radius, tuple(top[:4]), tuple(bottom[:4]))
+        if sprite is not None:
+            blend_at(img, sprite, x, y)
+
+    def _draw_chart_frame(self, img: Image.Image, x: int, y: int, w: int, h: int) -> None:
+        """折线图边框：强调色→暖色的渐变描边 + 柔和外发光（复合主题）。"""
+        st = self.style
+        c1 = getattr(st, "chart_frame", None)
+        if c1 is None:
+            return
+        c2 = getattr(st, "chart_frame2", None) or c1
+        radius = int(getattr(st, "chart_radius", 16))
+        pad = 10
+        sprite, p = border_layer(
+            w, h, radius, int(getattr(st, "chart_frame_w", 2)),
+            tuple(c1[:4]), tuple(c2[:4]),
+            glow=tuple(c1[:3]) + (int(getattr(st, "chart_glow_alpha", 110)),),
+            glow_blur=int(getattr(st, "chart_frame_blur", 6)),
+            glow_gain=float(getattr(st, "chart_frame_gain", 1.5)),
+            pad=pad,
+        )
+        blend_at(img, sprite, x - p, y - p)
+
     def _draw_header(self, img: Image.Image, draw: ImageDraw.ImageDraw, player: dict, y: int, phase: str = "all") -> int:
         x1 = self.PADDING
         x2 = self.W - self.PADDING
-        header_h = 190
+        header_h = int(getattr(self.style, "header_h", 0) or 190)
         y2 = y + header_h
 
         if phase in ("all", "fill"):
@@ -420,13 +483,14 @@ class ERRenderer:
             )
 
         # ===== 中间折线图 =====
-        chart_x = x1 + 215
+        chart_x = x1 + int(getattr(self.style, "chart_inset_x", 215))
         chart_y = y + 12
-        chart_w = 550
-        chart_h = 145
+        chart_w = int(getattr(self.style, "chart_w", 550))
+        chart_h = int(getattr(self.style, "chart_h", 145))
 
         mmr_chart = player.get("mmr_chart", [])
         if has_ranked_data and mmr_chart:
+            self._draw_chart_panel(img, chart_x - 6, chart_y - 6, chart_w + 20, chart_h + 32)
             try:
                 self._draw_mmr_chart(
                     img=img,
@@ -452,31 +516,44 @@ class ERRenderer:
                     pass
             except Exception:
                 pass
+            self._draw_chart_frame(img, chart_x - 6, chart_y - 6, chart_w + 20, chart_h + 32)
 
         # ===== 右侧段位图标 =====
         tier_icon_path = player.get("tier_full") or player.get("tier_icon", "")
-        tier_icon_size = 96
+        tier_icon_size = int(getattr(self.style, "tier_icon_size", 0) or 96)
         tier_icon_x = x2 - 190
         tier_icon_y = y + 12
 
         icon_center_x = tier_icon_x + tier_icon_size / 2
 
         if has_ranked_data and tier_icon_path:
-            tier_icon = self._load_icon(tier_icon_path, (tier_icon_size, tier_icon_size))
-            if tier_icon:
-                self._paste_icon(img, tier_icon, (tier_icon_x, tier_icon_y))
+            if getattr(self.style, "tier_art_fit", False):
+                # 段位大图是竖版（100x127），按比例装进 96 的框再水平居中
+                tier_icon = self._load_icon_fixed(tier_icon_path, (tier_icon_size, tier_icon_size))
+                if tier_icon:
+                    self._paste_icon(
+                        img, tier_icon,
+                        (tier_icon_x + (tier_icon_size - tier_icon.size[0]) // 2, tier_icon_y),
+                    )
+            else:
+                tier_icon = self._load_icon(tier_icon_path, (tier_icon_size, tier_icon_size))
+                if tier_icon:
+                    self._paste_icon(img, tier_icon, (tier_icon_x, tier_icon_y))
 
         # ===== 段位名称 =====
         tier_name = player.get("tier_name", "")
 
         if tier_name:
-            tier_font = self.font_big
+            _name_sz = int(getattr(self.style, "tier_name_size", 0) or 0)
+            tier_font = (self._load_named_font("MiSans-Bold", _name_sz)
+                         if _name_sz else self.font_big)
             bbox = draw.textbbox((0, 0), tier_name, font=tier_font)
             text_w = bbox[2] - bbox[0]
             text_h = bbox[3] - bbox[1]
 
             tier_text_x = int(icon_center_x - text_w / 2)
-            tier_text_y = tier_icon_y + tier_icon_size - 10
+            tier_text_y = (tier_icon_y + tier_icon_size
+                           - int(getattr(self.style, "tier_name_gap", 10)))
 
             draw.text(
                 (tier_text_x, tier_text_y),
@@ -497,7 +574,7 @@ class ERRenderer:
                     (stale_x, stale_y),
                     stale_text,
                     font=stale_font,
-                    fill=(200, 80, 100),
+                    fill=self.style.stale,
                 )
 
         # ===== 排名 =====
@@ -506,13 +583,15 @@ class ERRenderer:
         local_rank = int(player.get("rank_local", 0) or 0)
         local_percent = float(player.get("rank_local_percent", 0.0) or 0.0)
 
-        rank_font = self.font_tiny
+        _rank_sz = int(getattr(self.style, "tier_rank_size", 0) or 0)
+        rank_font = (self._load_named_font("MiSans-Regular", _rank_sz)
+                     if _rank_sz else self.font_tiny)
 
         global_text = f"Global {global_rank:,}名 (上位 {global_percent:.2f}%)" if global_rank > 0 else ""
         local_text = f"Asia {local_rank:,}名 (上位 {local_percent:.2f}%)" if local_rank > 0 else ""
 
-        rank_y1 = y + 138
-        rank_gap = 24
+        rank_y1 = y + int(getattr(self.style, "tier_rank_y", 138))
+        rank_gap = int(getattr(self.style, "tier_rank_gap", 24))
 
         if global_text:
             g_bbox = draw.textbbox((0, 0), global_text, font=rank_font)
@@ -594,7 +673,7 @@ class ERRenderer:
 
             draw.line(
                 [(chart_x1, yy), (chart_x2, yy)],
-                fill=(200, 200, 200),
+                fill=self.style.chart_grid,
                 width=1,
             )
 
@@ -607,7 +686,7 @@ class ERRenderer:
                 (chart_x1 - tw - 8, yy - th / 2),
                 text,
                 font=label_font,
-                fill=(130, 130, 130),
+                fill=self.style.chart_label,
             )
 
         points = []
@@ -621,11 +700,14 @@ class ERRenderer:
             py = chart_y2 - ((v - v_min) / span) * chart_h
             points.append((px, py))
 
-        draw.line(points, fill=(193, 132, 83), width=4)
+        if not self.style.legacy:
+            self._draw_mmr_series_themed(img, draw, points, x, y, w, h, chart_y2)
+        else:
+            draw.line(points, fill=(193, 132, 83), width=4)
 
-        r = 5
-        for px, py in points:
-            draw.ellipse((px - r, py - r, px + r, py + r), fill=(193, 132, 83))
+            r = 5
+            for px, py in points:
+                draw.ellipse((px - r, py - r, px + r, py + r), fill=(193, 132, 83))
 
         for (px, _py), label in zip(points, labels):
             bbox = draw.textbbox((0, 0), label, font=label_font)
@@ -635,7 +717,7 @@ class ERRenderer:
                 (px - tw / 2, chart_y2 + 6),
                 label,
                 font=label_font,
-                fill=(130, 130, 130),
+                fill=self.style.chart_label,
             )
 
     # =========================
@@ -647,6 +729,9 @@ class ERRenderer:
         y2 = y + self.SUMMARY_H
         if phase in ("all", "fill"):
             self._draw_card(draw, x1, y, x2, y2, only_fill=True)
+            simg = ERRenderer._card_img(draw)
+            if simg is not None:
+                self._draw_section_header(simg, x1 + 1, y + 1, x2 - 1, 32)
         if phase in ("all", "top"):
             self._draw_card(draw, x1, y, x2, y2, only_outline=True)
         if phase == "fill":
@@ -684,7 +769,7 @@ class ERRenderer:
         col_w = 330
         row_h = 36
 
-        dot_color = (255, 150, 180)
+        dot_color = self.style.dot
 
         for i, (label, value) in enumerate(stats):
             col = i % 3
@@ -712,7 +797,142 @@ class ERRenderer:
     # =========================
     # 常用英雄
     # =========================
+    # ---------- 卡片标题底（柔光渐变） ----------
+    def _draw_section_header(self, img: Image.Image, x1: int, y: int, x2: int,
+                             height: int) -> None:
+        """标题底：横向强调色→暖色渐变，再自上而下淡出，只贴合卡片顶部圆角。"""
+        st = self.style
+        left = getattr(st, "section_header", None)
+        if left is None:
+            return
+        right = getattr(st, "section_header2", None) or left
+        w = x2 - x1 + 1
+        h = int(height)
+        if w <= 2 or h <= 2:
+            return
+        ramp = Image.linear_gradient("L").resize((w, 1), Image.BILINEAR)
+        base = ImageOps.colorize(ramp, tuple(left[:3]), tuple(right[:3])).convert("RGBA")
+        base = base.resize((w, h), Image.BILINEAR)
+        fade = Image.linear_gradient("L").resize((1, h), Image.BILINEAR)
+        alpha = fade.point(lambda v: int(round(left[3] * (1.0 - v / 255.0))))
+        base.putalpha(alpha.resize((w, h), Image.BILINEAR))
+        mask = Image.new("L", (w, h), 0)
+        ImageDraw.Draw(mask).rounded_rectangle(
+            (0, 0, w - 1, h - 1), radius=max(0, int(st.card_radius)), fill=255)
+        base.putalpha(ImageChops.multiply(base.getchannel("A"), mask))
+        blend_at(img, base, x1, y)
+
+    # ---------- 常用英雄（列头同行版） ----------
+    _HERO_ROW_H = 64
+    _HERO_AVATAR = 50
+
+    def _common_heroes_h(self, n: int) -> int:
+        if n <= 0:
+            return 120
+        if self.style.hero_header:
+            return 48 + n * ERRenderer._HERO_ROW_H + 16
+        return 48 + n * 92 + 20
+
+    def _draw_common_heroes_themed(self, img: Image.Image, draw: ImageDraw.ImageDraw,
+                                   heroes: List[dict], y: int, phase: str = "all",
+                                   mode_label: str = "") -> int:
+        """列名与「常用英雄」标题同一行，数据行只写数值。"""
+        n = len(heroes)
+        row_h = ERRenderer._HERO_ROW_H
+        x1 = self.PADDING
+        x2 = self.W - self.PADDING
+        block_h = self._common_heroes_h(n)
+        y2 = y + block_h
+        is_rank = (mode_label == "排位")
+        start_y = y + 48
+
+        if phase in ("all", "fill"):
+            self._draw_card(draw, x1, y, x2, y2, only_fill=True)
+            himg = ERRenderer._card_img(draw)
+            if himg is not None:
+                self._draw_section_header(himg, x1 + 1, y + 1, x2 - 1, 44)
+            for i in range(n):
+                ry1 = start_y + i * row_h
+                self._draw_inner_card(draw, x1 + 14, ry1, x2 - 14, ry1 + row_h - 6)
+        if phase in ("all", "top"):
+            self._draw_card(draw, x1, y, x2, y2, only_outline=True)
+        if phase == "fill":
+            return y2
+
+        draw.text((x1 + 20, y + 12), "常用英雄", font=self.font, fill=self.text)
+
+        # 列名与标题同一行（右侧按数值列对齐）
+        cols = [
+            (x1 + 250, "场次 / 胜率"),
+            (x1 + 400, "场均排名"),
+            (x1 + 540, "平均击杀 / 助攻"),
+            (x1 + 720, "平均伤害"),
+        ]
+        if is_rank:
+            cols.append((x1 + 880, "RP"))
+        for cx, label in cols:
+            draw.text((cx, y + 26), label, font=self.font_tiny,
+                      fill=self.sub_text, anchor="lm")
+
+        avatar = ERRenderer._HERO_AVATAR
+        inset = 4
+        inner = avatar - 2 * inset
+        for i, hero in enumerate(heroes):
+            ry1 = start_y + i * row_h
+            mid = ry1 + (row_h - 6) // 2
+            ax = x1 + 24
+            ay = mid - avatar // 2
+
+            self._draw_char_border(img, draw, ax, ay, avatar)
+            icon = self._load_character_icon(hero.get("character_icon", ""), (inner, inner))
+            self._paste_icon_rounded(img, icon, (ax + inset, ay + inset),
+                                     self._avatar_radius(inner))
+
+            draw.text((x1 + 88, mid), str(hero.get("character_name", "")),
+                      font=self.font_small, fill=self.text, anchor="lm")
+            draw.text((x1 + 250, mid),
+                      f"{hero.get('play', 0)}场 | {hero.get('win_rate', 0)}%",
+                      font=self.font_small, fill=self.text, anchor="lm")
+            draw.text((x1 + 400, mid), f"{hero.get('avg_rank', 0)}",
+                      font=self.font_small, fill=self.text, anchor="lm")
+            draw.text((x1 + 540, mid),
+                      f"K {hero.get('avg_kill', 0)} / A {hero.get('avg_assist', 0)}",
+                      font=self.font_small, fill=self.text, anchor="lm")
+            draw.text((x1 + 720, mid), f"{hero.get('avg_damage', 0)}",
+                      font=self.font_small, fill=self.text, anchor="lm")
+            if is_rank:
+                gain = hero.get("mmr_gain", 0)
+                if gain > 0:
+                    txt, col = f"+{gain}", self.red
+                elif gain < 0:
+                    txt, col = f"{gain}", self.blue
+                else:
+                    txt, col = f"{gain}", self.text
+                draw.text((x1 + 880, mid), txt, font=self.font_small,
+                          fill=col, anchor="lm")
+        return y2
+
+    def _apply_team_damage_scale(self, lead_match: dict, detail: dict) -> None:
+        """首局伤害条的分母 = 首局队伍三人（本人 + 队友）输出的最大值。"""
+        members = detail.get("members") or []
+        damages = []
+        for m in members:
+            entry = m.get("entry") or {}
+            dmg = int(entry.get("damage", 0) or 0)
+            if dmg > 0:
+                damages.append(dmg)
+        if not damages:
+            return
+        team_max = max(damages)
+        lead_match["team_max_damage"] = team_max
+        for m in members:
+            entry = m.get("entry")
+            if isinstance(entry, dict):
+                entry["team_max_damage"] = team_max
+
     def _draw_common_heroes(self, img: Image.Image, draw: ImageDraw.ImageDraw, heroes: List[dict], y: int, phase: str = "all", mode_label: str = "") -> int:
+        if self.style.hero_header:
+            return self._draw_common_heroes_themed(img, draw, heroes, y, phase, mode_label)
         hero_count = len(heroes)
         row_h = 82
         block_h = 48 + hero_count * row_h + 16 if hero_count > 0 else 120
@@ -748,7 +968,7 @@ class ERRenderer:
                 line_y = row_y2 + 4
                 draw.line(
                     [(x1 + 30, line_y), (x2 - 30, line_y)],
-                    fill=(255, 200, 210),
+                    fill=self.style.divider,
                     width=2,
                 )
 
@@ -879,7 +1099,7 @@ class ERRenderer:
                 icon = future.result()
                 if icon:
                     pos = icon_positions[idx]
-                    self._paste_icon(img, icon, pos)
+                    self._paste_icon_rounded(img, icon, pos, self._avatar_radius(58))
 
         return y2
 
@@ -889,10 +1109,19 @@ class ERRenderer:
     def _draw_matches(self, img: Image.Image, draw: ImageDraw.ImageDraw, matches: List[dict], y: int, phase: str = "all",
                       first_extra_h: int = 0, detail: Optional[dict] = None) -> int:
         """绘制战绩列表。首局后若有队友详情面板（detail），其下方战绩整体下移 first_extra_h。"""
+        # 一体化模式：首局卡向下延伸，把「主玩家 + 队友」包进同一张卡（只留外框）
+        extra = 0
+        if detail is not None and matches and self.style.team_integrated:
+            extra = self._first_match_detail_h(detail)
+            # 首局伤害条分母 = 队伍三人输出最大值（不是整卡最大值）
+            self._apply_team_damage_scale(matches[0], detail)
         futures = {}
         for idx, match in enumerate(matches):
             row_y = y + idx * self.MATCH_H + (first_extra_h if idx >= 1 else 0)
-            futures[_DRAWING_POOL.submit(self._draw_single_match, img, draw, match, row_y, phase=phase)] = idx
+            futures[_DRAWING_POOL.submit(
+                self._draw_single_match, img, draw, match, row_y, phase=phase,
+                card_extra_h=(extra if idx == 0 else 0),
+            )] = idx
 
         # 等待所有战绩卡绘制完成（按区域隔离，可安全并行）
         for future in futures:
@@ -921,18 +1150,34 @@ class ERRenderer:
     """面板上移量：贴紧首局卡底部（首局卡与下一行原有 8px 间隙）"""
     _TEAM_AFTER_GAP = 10
     """面板底部与第二局卡之间的间隔"""
+    _TEAM_INT_DIV_GAP = 8
+    """一体化模式：队友行与细分割线之间的间距"""
+    _TEAM_INT_BOTTOM_PAD = 10
+    """一体化模式：最后一行队友与卡底之间的距离"""
+    _TEAM_SUB_CROP_TOP = 10
+    """一体化模式：队友行上下各裁掉的像素（压掉行内多余留白）"""
+    _TEAM_SUB_CROP_BOTTOM = 10
 
     def _teammate_scaled_size(self) -> tuple[int, int]:
         """队友卡等比缩放后的 (宽, 高)。
 
-        宽度贴齐面板（略窄 12px），缩放比 = 目标宽 / 原卡宽，
-        高度按同一比例计算，保证等比缩小而非上下压缩。
+        一体化模式：宽度贴齐主卡内缩 28px，队友直接落在主卡内部；
+        旧模式：宽度贴齐淡粉面板（略窄 12px）。
+        两者缩放比 = 目标宽 / 原卡宽，高度按同一比例计算，保证等比缩小。
         """
         card_w = self.W - 2 * self.PADDING
-        panel_w = card_w - 2 * ERRenderer._TEAM_PANEL_INSET
-        scaled_w = max(1, panel_w - 12)
+        row_h = self.MATCH_H
+        if self.style.team_integrated:
+            indent = int(getattr(self.style, "team_sub_inset", 0))
+            scaled_w = max(1, card_w - 28 - 2 * indent)
+            row_h = (self.MATCH_H
+                     - ERRenderer._TEAM_SUB_CROP_TOP
+                     - ERRenderer._TEAM_SUB_CROP_BOTTOM)
+        else:
+            panel_w = card_w - 2 * ERRenderer._TEAM_PANEL_INSET
+            scaled_w = max(1, panel_w - 12)
         scale = scaled_w / card_w
-        slot_h = max(1, int(round(self.MATCH_H * scale)))
+        slot_h = max(1, int(round(row_h * scale)))
         return scaled_w, slot_h
 
     def _teammate_slot_h(self) -> int:
@@ -940,10 +1185,18 @@ class ERRenderer:
         return self._teammate_scaled_size()[1]
 
     def _first_match_detail_h(self, detail: dict) -> int:
-        """队友详情块高度 = 面板（标题栏+分割区）+ (n-1) 张缩小队友卡（含间隙）+ 底部留白。"""
+        """队友详情块高度。
+
+        旧模式 = 面板（标题栏+分割区）+ (n-1) 张缩小队友卡（含间隙）+ 底部留白；
+        一体化模式 = (n-1) 行「细分割线 + 队友行」+ 底部留白（没有标题栏/面板）。
+        """
         n = len(detail.get("members") or [])
         if n < 2:
             return 0
+        if self.style.team_integrated:
+            rows = n - 1
+            div_block = 1 + 2 * ERRenderer._TEAM_INT_DIV_GAP
+            return rows * (div_block + self._teammate_slot_h()) + ERRenderer._TEAM_INT_BOTTOM_PAD
         cards_h = (n - 1) * self._teammate_slot_h() + (n - 2) * ERRenderer._TEAM_CARD_GAP
         return (
             ERRenderer._TEAM_CAPTION_H
@@ -952,10 +1205,71 @@ class ERRenderer:
             + ERRenderer._TEAM_BOTTOM_PAD
         )
 
+    _ROLE_BAR_H = 112
+    """主/次体左侧色条高度（行内垂直居中）"""
+
+    def _draw_lead_wash(self, img: Image.Image, x1: int, y: int, x2: int, y2: int,
+                        square_bottom: bool = False) -> None:
+        """主体行底色：极淡的强调色，顶部圆角贴合卡片；一体化时底部保持直角。"""
+        st = self.style
+        w = x2 - x1 - 1
+        h = y2 - y - 1
+        if w <= 0 or h <= 0:
+            return
+        r = max(0, int(st.card_radius) - 2)
+        color = st.team_lead_wash
+        # 自上而下淡出，避免在主卡里再出现一块"小卡片"
+        fade = (color[0], color[1], color[2], 0)
+        sprite = rounded_gradient(w, h, r, color, fade)
+        if sprite is None:
+            return
+        blend_at(img, sprite, x1 + 1, y + 1)
+
+    def _draw_rank_bar(self, img: Image.Image, x: int, row_y: int,
+                       color, width: int) -> None:
+        """名次色左条：主色取自名次文字，下端过渡到主题暖色（样式与主条一致）。"""
+        st = self.style
+        warm = tuple((getattr(st, "team_lead_bar2", None) or (255, 172, 120))[:3])
+        c = tuple(color)[:3]
+        end = tuple(int(c[k] * 0.60 + warm[k] * 0.40) for k in range(3))
+        h = ERRenderer._ROLE_BAR_H
+        y0 = row_y + (self.MATCH_H - 8 - h) // 2
+        sprite = rounded_gradient(max(1, int(width)), h, max(1, int(width) // 2),
+                                  c + (255,), end + (255,))
+        if sprite is not None:
+            blend_at(img, sprite, x, y0)
+
+    def _draw_role_bar(self, img: Image.Image, x: int, row_y: int,
+                       color: tuple, width: int) -> None:
+        """行首竖向色条：主体粗且饱和，次体细且淡，用来一眼区分主次。"""
+        h = ERRenderer._ROLE_BAR_H
+        y0 = row_y + (self.MATCH_H - 8 - h) // 2
+        c2 = None
+        if color is self.style.team_lead_bar:
+            c2 = getattr(self.style, "team_lead_bar2", None)
+        sprite = rounded_gradient(max(1, int(width)), h, max(1, int(width) // 2),
+                                  color, c2 or color)
+        blend_at(img, sprite, x, y0)
+
+    def _draw_team_divider(self, img: Image.Image, draw: ImageDraw.ImageDraw,
+                           x1: int, x2: int, y: int, color=None) -> None:
+        """一体化模式下的队友分割线：1px，左右各内缩 20px，颜色取主题 divider。"""
+        st = self.style
+        left, right = x1 + 20, x2 - 20
+        if right <= left:
+            return
+        if st.legacy:
+            draw.rectangle((left, y, right, y), fill=(255, 215, 225))
+        else:
+            line_color = color or getattr(st, "team_row_divider", None) or st.team_divider
+            blend_at(img, Image.new("RGBA", (right - left + 1, 1), line_color), left, y)
+
     def _draw_match_teammates(self, img: Image.Image, draw: ImageDraw.ImageDraw, detail: dict, y: int, phase: str = "all") -> None:
-        """在首局战绩卡下方渲染：一个淡粉色铺底的外层面板（带边框、比主卡内缩），
-        内含标题栏、分割线，以及白色铺底+边框的队友战绩卡（不显示时间/服务器/ID）。
-        队友卡内容布局与主玩家完全一致，按宽度贴齐面板的比例等比缩小。
+        """首局队友：两种呈现方式。
+
+        一体化（team_integrated）：队友直接落在首局卡内部，没有各自的卡边框/底色，
+        主玩家与队友、队友与队友之间只用一条 1px 分割线，整块共用外框；
+        旧模式：淡粉面板 + 白色带边框的缩小队友卡。
         """
         members = detail.get("members") or []
         n = len(members)
@@ -965,8 +1279,38 @@ class ERRenderer:
         x1 = self.PADDING
         x2 = self.W - self.PADDING
 
-        # 队友卡等比缩放尺寸（宽度贴齐面板，高度同比例）
+        # 队友卡等比缩放尺寸（宽度贴齐容器，高度同比例）
         scaled_w, slot_h = self._teammate_scaled_size()
+
+        if self.style.team_integrated:
+            if phase not in ("all", "top"):
+                return
+            row_y = y + ERRenderer._TEAM_INT_DIV_GAP
+            paste_x = x1 + (x2 - x1 - scaled_w) // 2
+            last = len(members) - 2
+            strong = getattr(self.style, "team_row_divider_strong", None)
+            for i, m in enumerate(members[1:]):
+                self._draw_team_divider(img, draw, x1, x2, row_y,
+                                        color=(strong if (i == 0 and strong) else None))
+                row_y += 1 + ERRenderer._TEAM_INT_DIV_GAP
+                # 无卡：透明白底渲染，直接叠在主卡同款渐变上
+                tmp = Image.new("RGBA", (self.W, self.MATCH_H), (0, 0, 0, 0))
+                tmp_draw = ImageDraw.Draw(tmp)
+                self._draw_single_match(
+                    tmp, tmp_draw, m["entry"], 0, phase="all",
+                    with_card=False, show_meta=False, show_rank_mode=False, role="sub",
+                )
+                card = tmp.crop((x1, ERRenderer._TEAM_SUB_CROP_TOP, x2,
+                                 self.MATCH_H - ERRenderer._TEAM_SUB_CROP_BOTTOM))
+                card = card.resize((scaled_w, slot_h), Image.LANCZOS)
+                op = float(self.style.team_sub_opacity)
+                if op < 0.999:
+                    card.putalpha(card.getchannel("A").point(lambda v, o=op: int(v * o)))
+                img.paste(card, (paste_x, row_y), card)
+                row_y += slot_h
+                if i < last:
+                    row_y += ERRenderer._TEAM_INT_DIV_GAP
+            return
 
         # 外层面板：比主卡左右各内缩 8px，淡粉色铺底
         inset = ERRenderer._TEAM_PANEL_INSET
@@ -977,17 +1321,39 @@ class ERRenderer:
 
         if phase in ("all", "fill"):
             # 面板白色铺底（圆角与主卡一致）
-            draw.rounded_rectangle((px1, y, px2, panel_y2), radius=18, fill=(255, 255, 255))
-            # 仅头部标题栏保留淡粉色（顶部随面板圆角，底部补直角）
-            draw.rounded_rectangle((px1, y, px2, y + cap), radius=18, fill=(255, 238, 244))
-            draw.rectangle((px1, y + cap - 18, px2, y + cap), fill=(255, 238, 244))
+            if self.style.legacy:
+                draw.rounded_rectangle((px1, y, px2, panel_y2), radius=18, fill=(255, 255, 255))
+                # 仅头部标题栏保留淡粉色（顶部随面板圆角，底部补直角）
+                draw.rounded_rectangle((px1, y, px2, y + cap), radius=18, fill=(255, 238, 244))
+                draw.rectangle((px1, y + cap - 18, px2, y + cap), fill=(255, 238, 244))
+            else:
+                st = self.style
+                pimg = ERRenderer._card_img(draw)
+                pw = px2 - px1 + 1
+                ph = panel_y2 - y + 1
+                blend_at(pimg, rounded_gradient(pw, ph, st.card_radius, st.team_panel, st.team_panel), px1, y)
+                blend_at(pimg, rounded_gradient(pw, cap, st.card_radius, st.team_header, st.team_header), px1, y)
+                blend_at(pimg, Image.new("RGBA", (pw, 18), st.team_header), px1, y + cap - 18)
 
         if phase in ("all", "top"):
             # 面板边框（与主卡同款 2px 淡粉）
-            draw.rounded_rectangle((px1, y, px2, panel_y2), radius=18, outline=self.pink_border, width=2)
+            if self.style.legacy:
+                draw.rounded_rectangle((px1, y, px2, panel_y2), radius=18, outline=self.pink_border, width=2)
+            else:
+                st = self.style
+                pimg = ERRenderer._card_img(draw)
+                sprite, pad = border_layer(px2 - px1 + 1, panel_y2 - y + 1, st.card_radius,
+                                           int(st.card_border_w), st.card_border,
+                                           st.card_border_bottom or st.card_border, pad=0)
+                blend_at(pimg, sprite, px1 - pad, y - pad)
             # 标题栏下方分割线
             div_y = y + cap + 6
-            draw.rectangle((px1, div_y, px2, div_y + 2), fill=(255, 215, 225))
+            if self.style.legacy:
+                draw.rectangle((px1, div_y, px2, div_y + 2), fill=(255, 215, 225))
+            else:
+                blend_at(ERRenderer._card_img(draw),
+                         Image.new("RGBA", (px2 - px1 + 1, 2), self.style.team_divider),
+                         px1, div_y)
             # 头部仅保留下拉箭头与右侧副信息（排名 · 模式）
             draw.text((px1 + 14, y + 6), "▼", font=self.font_small, fill=self.text)
             sub = f"{'逃生' if detail.get('escaped') else '#' + str(detail.get('rank', 0))} · {detail.get('mode_label', '')}"
@@ -1006,23 +1372,32 @@ class ERRenderer:
             tmp_draw = ImageDraw.Draw(tmp)
             self._draw_single_match(
                 tmp, tmp_draw, m["entry"], 0, phase="all",
-                card_fill=(255, 255, 255), show_meta=False, show_rank_mode=False,
+                card_fill=self.style.team_card_fill, show_meta=False, show_rank_mode=False,
             )
             card = tmp.crop((x1, 0, x2, self.MATCH_H))
             card = card.resize((scaled_w, slot_h), Image.LANCZOS)
             img.paste(card, (paste_x, row_y), card)
             row_y += slot_h + ERRenderer._TEAM_CARD_GAP
 
-    def _draw_single_match(self, img: Image.Image, draw: ImageDraw.ImageDraw, match: dict, y: int, phase: str = "all", with_card: bool = True, card_fill=None, show_meta: bool = True, show_rank_mode: bool = True) -> int:
+    def _draw_single_match(self, img: Image.Image, draw: ImageDraw.ImageDraw, match: dict, y: int, phase: str = "all", with_card: bool = True, card_fill=None, show_meta: bool = True, show_rank_mode: bool = True, card_extra_h: int = 0, role: str = "lead") -> int:
         x1 = self.PADDING
         x2 = self.W - self.PADDING
-        y2 = y + self.MATCH_H - 8
+        # card_extra_h：一体化模式下首局卡向下延伸，把队友行一起框住
+        y2 = y + self.MATCH_H - 8 + card_extra_h
 
         if with_card:
             if phase in ("all", "fill"):
                 self._draw_card(draw, x1, y, x2, y2, only_fill=True, fill=card_fill)
             if phase in ("all", "top"):
                 self._draw_card(draw, x1, y, x2, y2, only_outline=True)
+
+        # 主次分层：主体铺极淡强调色底（左条在名次文字画完后按名次色绘制）；次体靠缩进 + 缩小
+        ins = int(getattr(self.style, "row_inset", 0) or 0)
+        if (role == "lead" and getattr(self.style, "team_lead_wash", None) is not None
+                and phase in ("all", "top")):
+            self._draw_lead_wash(img, x1, y, x2, y + self.MATCH_H - 8,
+                                 square_bottom=card_extra_h > 0)
+
         if phase == "fill":
             return y + self.MATCH_H
 
@@ -1045,40 +1420,40 @@ class ERRenderer:
         else:
             kda_value = round((kills + assists) / max(deaths, 1), 2)
 
-        avatar_x = x1 + 14
+        avatar_x = x1 + 14 + ins
         if show_rank_mode:
             avatar_y = y + 32
         else:
             # 队友卡：头像+角色名整体基于卡片上下居中
             avatar_y = y + max(0, (self.MATCH_H - 8 - 72 - 14) // 2)
 
-        time_x = x1 + 12
+        time_x = x1 + 12 + ins
         time_y = y + 6
 
-        rank_x = x1 + 92
+        rank_x = x1 + 92 + ins
         rank_y = y + 34
 
-        change_x = x1 + 150
+        change_x = x1 + 150 + ins
         change_y = y + 38
 
-        stat_x = x1 + 92
+        stat_x = x1 + 92 + ins
         stat_y = y + 66
 
-        label_x = x1 + 92
+        label_x = x1 + 92 + ins
         label_y = y + 100
 
-        icon_x = x1 + 225
+        icon_x = x1 + 225 + ins
         icon_y = y + 28
         trait_row_y = y + 82
 
-        damage_x = x1 + 360
-        kda_x = x1 + 505
-        rp_x = x1 + 625
+        damage_x = x1 + 360 + ins
+        kda_x = x1 + 505 + ins
+        rp_x = x1 + 625 + ins
 
         value_y = y + 42
         sub_y = y + 82
 
-        item_x = x2 - 250
+        item_x = x2 - int(getattr(self.style, "item_right_inset", 250))
         item_y = y + 22
 
         # ===== 左侧头像 =====
@@ -1087,7 +1462,8 @@ class ERRenderer:
         icon_size = avatar_size - 2 * avatar_inset
         hero_icon = self._load_character_icon(match.get("character_icon", ""), (icon_size, icon_size))
         if hero_icon:
-            self._paste_icon(img, hero_icon, (avatar_x + avatar_inset, avatar_y + avatar_inset))
+            self._paste_icon_rounded(img, hero_icon, (avatar_x + avatar_inset, avatar_y + avatar_inset),
+                                     self._avatar_radius(avatar_size))
 
         self._draw_char_border(img, draw, avatar_x, avatar_y, avatar_size)
 
@@ -1205,7 +1581,7 @@ class ERRenderer:
                     if rank == 1:
                         rank_color = self.gold
                     elif rank in (2, 3):
-                        rank_color = (255, 180, 90)
+                        rank_color = self.style.rank_23
 
             if is_cobalt_mode and rank in (1, 2):
                 rank_font = self.font
@@ -1214,6 +1590,14 @@ class ERRenderer:
             else:
                 rank_font = self.font_big
             draw.text((rank_x, rank_y), rank_text, font=rank_font, fill=rank_color)
+            # 左条主色跟随名次文字颜色（无特殊名次时仍用主题强调色），渐变样式不变
+            if (role == "lead" and self.style.team_lead_bar is not None
+                    and phase in ("all", "top")):
+                bar_c = rank_color
+                if tuple(bar_c)[:3] == tuple(self.text)[:3]:
+                    bar_c = self.style.team_lead_bar
+                self._draw_rank_bar(img, x1 + max(8, ins - 4), y, bar_c,
+                                    int(self.style.team_lead_bar_w))
 
             # ===== 游戏模式 =====
             draw.text(
@@ -1231,7 +1615,7 @@ class ERRenderer:
         draw.rounded_rectangle(
             (icon_x, icon_y, icon_x + 36, icon_y + 36),
             radius=8,
-            fill=(30, 30, 30),
+            fill=self.style.weapon_chip,
         )
         weapon_icon = self._load_icon(match.get("weapon_icon", ""), (28, 28))
         if weapon_icon:
@@ -1251,15 +1635,15 @@ class ERRenderer:
                 draw.rounded_rectangle(
                     (badge_x, badge_y, badge_x + 16, badge_y + 16),
                     radius=4,
-                    fill=(245, 245, 245),
-                    outline=(60, 60, 60),
+                    fill=self.style.badge_fill,
+                    outline=self.style.badge_outline,
                     width=1,
                 )
                 draw.text(
                     (badge_x + 4, badge_y - 1),
                     str(tactical_level),
                     font=self.font_mini if hasattr(self, "font_mini") else self._load_font(12),
-                    fill=(20, 20, 20),
+                    fill=self.style.badge_text,
                 )
 
         # ===== 第二行：主天赋图标 + 副组类型图标 =====
@@ -1284,12 +1668,23 @@ class ERRenderer:
             # 条中心 = 卡片纵向中心
             bar_y = y + (self.MATCH_H - 8) // 2 - bar_h // 2
             pct = max(0.0, min(100.0, damage / team_max_damage * 100.0))
-            draw.rounded_rectangle((bar_x, bar_y, bar_x + bar_w, bar_y + bar_h),
-                                   radius=bar_h // 2, fill=(240, 232, 235))
+            if self.style.legacy:
+                draw.rounded_rectangle((bar_x, bar_y, bar_x + bar_w, bar_y + bar_h),
+                                       radius=bar_h // 2, fill=(240, 232, 235))
+            else:
+                st = self.style
+                blend_at(img, rounded_gradient(bar_w, bar_h, bar_h // 2, st.dmg_track, st.dmg_track),
+                         bar_x, bar_y)
             fill_w = bar_w * pct / 100.0
             if fill_w > 0:
-                draw.rounded_rectangle((bar_x, bar_y, bar_x + fill_w, bar_y + bar_h),
-                                       radius=bar_h // 2, fill=(255, 100, 130))
+                if self.style.legacy:
+                    draw.rounded_rectangle((bar_x, bar_y, bar_x + fill_w, bar_y + bar_h),
+                                           radius=bar_h // 2, fill=(255, 100, 130))
+                else:
+                    st = self.style
+                    fw = max(2, int(round(fill_w)))
+                    blend_at(img, rounded_gradient(fw, bar_h, bar_h // 2, st.dmg_fill, st.dmg_fill),
+                             bar_x, bar_y)
             # 数字在条上方，标签贴于条下方，均相对进度条中心左右居中
             cx = bar_x + bar_w / 2
             dmg_font = self.font_small
@@ -1322,7 +1717,12 @@ class ERRenderer:
             mmr_before_bbox = draw.textbbox((0, 0), mmr_before_text, font=self.font_big)
             mmr_before_w = mmr_before_bbox[2] - mmr_before_bbox[0]
             
-            if mmr_change >= 0:
+            if role == "sub":
+                # 队友（次体）的 RP 增减统一灰色，让主体的红/蓝更突出
+                mmr_change_text = f"+{mmr_change}" if mmr_change > 0 else f"{mmr_change}"
+                mmr_change_color = (getattr(self.style, "mmr_muted", None)
+                                    or self.sub_text)
+            elif mmr_change >= 0:
                 mmr_change_text = f"+{mmr_change}"
                 mmr_change_color = self.red
             elif mmr_change < 0:
@@ -1374,14 +1774,14 @@ class ERRenderer:
         # ===== 装备：3上2下，下排居中 =====
         items = match.get("items", [])[:5]
 
-        item_w = 52
-        item_h = 40
+        item_w = int(getattr(self.style, "item_w", 52))
+        item_h = int(getattr(self.style, "item_h", 40))
         item_padding = 5
 
-        top_gap_x = 64
-        bottom_gap_x = 64
+        top_gap_x = int(getattr(self.style, "item_gap", 64))
+        bottom_gap_x = top_gap_x
         top_y = item_y
-        bottom_y = item_y + 52
+        bottom_y = item_y + int(getattr(self.style, "item_row_gap", 52))
 
         top_row_width = top_gap_x * 2
         top_center_x = item_x + top_row_width / 2
@@ -1416,11 +1816,174 @@ class ERRenderer:
                 icon_w, icon_h = item_icon.size
                 icon_x = ix + (item_w - icon_w) // 2
                 icon_y = iy + (item_h - icon_h) // 2
-                self._paste_icon(img, item_icon, (icon_x, icon_y))
+                self._paste_icon_rounded(img, item_icon, (icon_x, icon_y),
+                                         int(self.style.item_icon_radius))
 
             self._draw_item_glow_frame(img, ix, iy, item_w, item_h, frame_color)
 
         return y + self.MATCH_H
+
+
+    # =========================
+    # 主题绘制（仅非 legacy 主题走这里；坐标与旧逻辑完全一致）
+    # =========================
+    def _new_canvas(self, height: int) -> Image.Image:
+        """画布：legacy 纯色；主题模式为渐变底 + 柔光光斑。"""
+        if self.style.legacy:
+            return Image.new("RGBA", (self.W, height), self.bg + (255,))
+        return build_canvas(self.W, height, self.style)
+
+    def _finish_canvas(self, img: Image.Image) -> Image.Image:
+        """出图前的收尾钩子（保留给后续加暗角 / 噪点等）。"""
+        return img
+
+    @staticmethod
+    def _card_img(draw) -> Optional[Image.Image]:
+        img = getattr(draw, "_image", None)
+        if isinstance(img, Image.Image) and img.mode == "RGBA":
+            return img
+        return None
+
+    def _avatar_radius(self, size: int) -> int:
+        if self.style.legacy:
+            return 0
+        ratio = max(0.0, min(0.5, float(self.style.avatar_radius_ratio)))
+        return int(round(size * ratio))
+
+    def _paste_icon_rounded(self, img: Image.Image, icon: Optional[Image.Image],
+                            pos: tuple[int, int], radius: int = 0) -> None:
+        """贴图标；radius>0 时把方形图标裁成圆角（视觉形状跟主题一致）。"""
+        if icon is None:
+            return
+        if radius <= 0:
+            img.paste(icon, pos, icon)
+            return
+        mask = Image.new("L", icon.size, 0)
+        ImageDraw.Draw(mask).rounded_rectangle(
+            (0, 0, icon.size[0] - 1, icon.size[1] - 1), radius=radius, fill=255)
+        img.paste(icon, pos, ImageChops.multiply(icon.getchannel("A"), mask))
+
+    def _draw_card_themed(self, draw, x1, y1, x2, y2, only_fill, only_outline, fill):
+        img = ERRenderer._card_img(draw)
+        if img is None:
+            return
+        st = self.style
+        w = x2 - x1 + 1
+        h = y2 - y1 + 1
+        if w <= 0 or h <= 0:
+            return
+        r = int(st.card_radius)
+
+        if not only_outline:
+            if st.card_shadow is not None:
+                sprite, pad = shadow_layer(w, h, r, st.card_shadow,
+                                           st.card_shadow_blur, st.card_shadow_dy)
+                blend_at(img, sprite, x1 - pad, y1 - pad)
+            if st.card_glow is not None:
+                sprite, pad = glow_layer(w, h, r, st.card_glow, st.card_glow_blur,
+                                         st.card_glow_gain, int(st.card_glow_blur) + 4,
+                                         width=max(1, int(st.card_border_w)), outside_only=True)
+                blend_at(img, sprite, x1 - pad, y1 - pad)
+            if fill is not None:
+                f = tuple(fill)
+                top = (f[0], f[1], f[2], f[3] if len(f) > 3 else st.card_fill[3])
+                bottom = top
+            else:
+                top = st.card_fill
+                bottom = st.card_fill_bottom or st.card_fill
+            blend_at(img, rounded_gradient(w, h, r, top, bottom, st.card_rim), x1, y1)
+
+        if not only_fill and st.card_border_w > 0:
+            sprite, pad = border_layer(w, h, r, int(st.card_border_w), st.card_border,
+                                       st.card_border_bottom or st.card_border, pad=0)
+            blend_at(img, sprite, x1 - pad, y1 - pad)
+
+    def _draw_inner_card_themed(self, draw, x1, y1, x2, y2):
+        img = ERRenderer._card_img(draw)
+        if img is None:
+            return
+        st = self.style
+        w = x2 - x1 + 1
+        h = y2 - y1 + 1
+        if w <= 0 or h <= 0:
+            return
+        r = int(st.inner_card_radius)
+        blend_at(img, rounded_gradient(w, h, r, st.inner_card_fill, st.inner_card_fill), x1, y1)
+        if st.inner_card_border is not None:
+            sprite, pad = border_layer(w, h, r, 1, st.inner_card_border,
+                                       st.inner_card_border, pad=0)
+            blend_at(img, sprite, x1 - pad, y1 - pad)
+
+    def _draw_char_border_themed(self, img, draw, x, y, size):
+        st = self.style
+        r = self._avatar_radius(size)
+        pad = max(8, int(st.avatar_glow_blur) * 2)
+        glow = tuple(st.avatar_glow[:3]) + (150,)
+        sprite, p = border_layer(size, size, r, int(st.avatar_border_w),
+                                 st.avatar_line, st.avatar_line,
+                                 glow=glow, glow_blur=st.avatar_glow_blur,
+                                 glow_gain=st.avatar_glow_gain, pad=pad)
+        blend_at(img, sprite, x - p, y - p)
+        if st.avatar_line_inset > 0:
+            ins = int(st.avatar_line_inset)
+            layer = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+            ImageDraw.Draw(layer).rounded_rectangle(
+                (ins, ins, size - 1 - ins, size - 1 - ins),
+                radius=max(0, r - ins),
+                outline=getattr(st, "avatar_line2", None) or st.avatar_line, width=1)
+            blend_at(img, layer, x, y)
+
+    def _draw_item_glow_frame_themed(self, img, x, y, w, h, color):
+        st = self.style
+        c = tuple(color)[:3]
+        # 描边：品质色在上、向下过渡到主题暖色（和左侧主条同一套主色调）
+        warm = tuple((getattr(st, "team_lead_bar2", None) or (255, 172, 120))[:3])
+        # 上端提亮（柔光），下端向主题暖色过渡（主色调统一）
+        top = tuple(int(c[k] * 0.55 + 255 * 0.45) for k in range(3))
+        bottom = tuple(int(c[k] * 0.62 + warm[k] * 0.38) for k in range(3))
+        # 高亮低发散：短半径 + 高强度，光晕只贴着描边一小圈
+        pad = max(8, int(st.item_glow_blur) * 3)
+        sprite, p = border_layer(w, h, int(st.item_radius), int(st.item_border_w),
+                                 top + (255,), bottom + (255,), glow=c + (int(getattr(st, "item_glow_alpha", 255)),),
+                                 glow_blur=st.item_glow_blur,
+                                 glow_gain=st.item_glow_gain, pad=pad)
+        blend_at(img, sprite, x - p, y - p)
+
+    def _draw_mmr_series_themed(self, img, draw, points, x, y, w, h, chart_y2):
+        """折线主体：面积渐变 + 折线外发光 + 渐变描边 + 光点（只模糊图表局部）。"""
+        st = self.style
+        if len(points) < 2:
+            return
+        c1 = tuple(st.chart_line)
+        c2 = tuple(st.chart_line2 or st.chart_line)
+        local = [(px - x, py - y) for px, py in points]
+
+        if st.chart_area is not None:
+            area = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+            poly = local + [(local[-1][0], chart_y2 - y), (local[0][0], chart_y2 - y)]
+            ImageDraw.Draw(area).polygon(poly, fill=tuple(st.chart_area))
+            fade = Image.linear_gradient("L").resize((w, h), Image.BILINEAR)
+            alpha = ImageChops.multiply(area.getchannel("A"), ImageOps.invert(fade))
+            area.putalpha(alpha)
+            blend_at(img, area, x, y)
+
+        if st.chart_glow is not None:
+            halo = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+            ImageDraw.Draw(halo).line(local, fill=tuple(st.chart_glow), width=7, joint="curve")
+            halo = halo.filter(ImageFilter.GaussianBlur(5))
+            blend_at(img, halo, x, y)
+
+        segs = max(1, len(points) - 1)
+        for i in range(len(points) - 1):
+            t = i / segs
+            seg = tuple(int(c1[k] + (c2[k] - c1[k]) * t) for k in range(3))
+            draw.line([points[i], points[i + 1]], fill=seg, width=4)
+
+        r = 5
+        dot = tuple(st.chart_dot or c1)
+        for px, py in points:
+            draw.ellipse((px - r, py - r, px + r, py + r), fill=dot)
+            draw.ellipse((px - r, py - r, px + r, py + r), outline=c1, width=1)
 
     # =========================
     # 工具
@@ -1573,6 +2136,10 @@ class ERRenderer:
         base_img.paste(icon, pos, icon)
 
     def _draw_card(self, draw, x1, y1, x2, y2, only_fill: bool = False, only_outline: bool = False, fill=None):
+        if not self.style.legacy:
+            # 主题模式：渐变底色 + 渐变描边 + 外发光 / 投影（坐标不变）
+            self._draw_card_themed(draw, x1, y1, x2, y2, only_fill, only_outline, fill)
+            return
         if only_outline:
             draw.rounded_rectangle(
                 (x1, y1, x2, y2),
@@ -1597,6 +2164,9 @@ class ERRenderer:
         )
 
     def _draw_inner_card(self, draw: ImageDraw.ImageDraw, x1: int, y1: int, x2: int, y2: int, only_fill: bool = False) -> None:
+        if not self.style.legacy:
+            self._draw_inner_card_themed(draw, x1, y1, x2, y2)
+            return
         draw.rounded_rectangle((x1, y1, x2, y2), radius=12, fill=self.card_2)
 
     @classmethod
@@ -1673,6 +2243,9 @@ class ERRenderer:
     def _draw_item_glow_frame(self, img: Image.Image, x: int, y: int,
                               w: int, h: int, color: tuple[int, int, int]) -> None:
         """在装备图标外叠一层中空发光边框，中心保持透明。"""
+        if not self.style.legacy:
+            self._draw_item_glow_frame_themed(img, x, y, w, h, color)
+            return
         pad = 12
         sprite = self._glow_frame_sprite(
             (w, h), color, color,
@@ -1683,6 +2256,9 @@ class ERRenderer:
     def _draw_char_border(self, img: Image.Image, draw: ImageDraw.ImageDraw,
                           x: int, y: int, size: int) -> None:
         """外发光双边框：外层2px淡粉 + 内层1px亮粉，光晕只落在框外。"""
+        if not self.style.legacy:
+            self._draw_char_border_themed(img, draw, x, y, size)
+            return
         pad = 16
         sprite = self._glow_frame_sprite(
             (size, size), (255, 95, 131), self.pink_border,
@@ -1775,9 +2351,11 @@ class ERRenderer:
         return None
 
     @staticmethod
-    def _get_cached_paw(size: int, rotation: int, opacity: float) -> Optional[Image.Image]:
+    def _get_cached_paw(size: int, rotation: int, opacity: float,
+                        tint: Optional[tuple] = None) -> Optional[Image.Image]:
         """按(尺寸,旋转,透明度)缓存处理好的猫爪水印。带超时保护。"""
-        key = (int(size), int(rotation) % 360, int(opacity * 1000))
+        key = (int(size), int(rotation) % 360, int(opacity * 1000),
+               tuple(tint[:3]) if tint else None)
         try:
             with _acquire_timeout(
                 ERRenderer._paw_cache_lock,
@@ -1794,9 +2372,11 @@ class ERRenderer:
         return _SENTINEL_NONE  # 外部区分：SENTINEL表示没查到，需要继续生成
 
     @staticmethod
-    def _put_cached_paw(size: int, rotation: int, opacity: float, value: Optional[Image.Image]) -> None:
+    def _put_cached_paw(size: int, rotation: int, opacity: float,
+                        value: Optional[Image.Image], tint: Optional[tuple] = None) -> None:
         """写入猫爪水印缓存。带超时保护，超时则放弃本次写入。"""
-        key = (int(size), int(rotation) % 360, int(opacity * 1000))
+        key = (int(size), int(rotation) % 360, int(opacity * 1000),
+               tuple(tint[:3]) if tint else None)
         try:
             with _acquire_timeout(
                 ERRenderer._paw_cache_lock,
@@ -1815,6 +2395,11 @@ class ERRenderer:
         fonts_dir_parent = self.fonts_dir.parent
         paw_base = ERRenderer._get_paw_base(fonts_dir_parent)
         if paw_base is None:
+            return
+
+        # 主题化：整体透明度按主题缩放（暗色主题淡一点），可选统一着色
+        tint = self.style.paw_tint
+        if self.style.paw_opacity <= 0:
             return
 
         try:
@@ -1836,9 +2421,9 @@ class ERRenderer:
             for wm in watermarks:
                 size = int(wm["size"])
                 rotation = int(wm["rotation"])
-                opacity = float(wm["opacity"])
+                opacity = float(wm["opacity"]) * self.style.paw_opacity
 
-                processed = ERRenderer._get_cached_paw(size, rotation, opacity)
+                processed = ERRenderer._get_cached_paw(size, rotation, opacity, tint)
                 if processed is _SENTINEL_NONE:
                     # 缓存未命中：生成
                     try:
@@ -1848,11 +2433,15 @@ class ERRenderer:
                         alpha = scaled.split()[-1]
                         alpha = alpha.point(lambda p, o=opacity: int(p * o))
                         scaled.putalpha(alpha)
+                        if tint is not None:
+                            tinted = Image.new("RGBA", scaled.size, tuple(tint[:3]) + (255,))
+                            tinted.putalpha(scaled.getchannel("A"))
+                            scaled = tinted
                         processed = scaled
-                        ERRenderer._put_cached_paw(size, rotation, opacity, processed)
+                        ERRenderer._put_cached_paw(size, rotation, opacity, processed, tint)
                     except Exception:
                         processed = None
-                        ERRenderer._put_cached_paw(size, rotation, opacity, None)
+                        ERRenderer._put_cached_paw(size, rotation, opacity, None, tint)
 
                 if processed is None:
                     continue
@@ -1913,7 +2502,7 @@ class ERRenderer:
         grid_h = rows * CARD_H + (rows - 1) * GAP
 
         total_h = self.PADDING + HEADER_H + self.PADDING + grid_h + self.PADDING + FOOTER_H
-        img = Image.new("RGBA", (self.W, total_h), self.bg + (255,))
+        img = self._new_canvas(total_h)
         draw = ImageDraw.Draw(img)
 
         content_x = self.PADDING
@@ -1953,6 +2542,7 @@ class ERRenderer:
         draw.text(((self.W - (hb[2] - hb[0])) / 2, footer_y + 22), help_text, font=help_font, fill=self.sub_text)
 
         output_path = self.output_dir / f"er_rank_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}.png"
+        img = self._finish_canvas(img)
         img.convert("RGB").save(output_path, "PNG", optimize=False)
         return str(output_path)
 
@@ -1988,7 +2578,8 @@ class ERRenderer:
         h = y2 - y1 + 1
         if w <= 0 or h <= 0:
             return
-        key = (w, h)
+        # 主题也纳入 key：同一进程内切换主题时不会复用旧配色的模板
+        key = (w, h, self.style.name)
 
         # ---- Phase 1: 带超时读取缓存模板 ----
         try:
@@ -1999,7 +2590,7 @@ class ERRenderer:
             ):
                 cached = ERRenderer._card_gradient_cache.get(key)
                 if cached is not None:
-                    img.paste(cached, (x1, y1))
+                    img.paste(cached, (x1, y1), cached)
                     return
         except _RendererLockTimeoutError as e:
             logger.warning(f"[ER渲染] 渐变模板缓存读取锁超时，降级为直接生成: {e}")
@@ -2019,13 +2610,12 @@ class ERRenderer:
         except _RendererLockTimeoutError as e:
             logger.warning(f"[ER渲染] 渐变模板缓存写入锁超时，跳过缓存: {e}")
 
-        img.paste(template, (x1, y1))
+        img.paste(template, (x1, y1), template)
 
-    @staticmethod
-    def _build_card_gradient_template(w: int, h: int) -> Image.Image:
-        """生成带透明圆角的淡粉→白垂直渐变 RGBA 模板（圆角外 alpha=0）。"""
-        top = (255, 240, 245)
-        bottom = (255, 255, 255)
+    def _build_card_gradient_template(self, w: int, h: int) -> Image.Image:
+        """生成带透明圆角的垂直渐变 RGBA 模板（圆角外 alpha=0）。"""
+        top = self.style.rank_card_top[:3]
+        bottom = self.style.rank_card_bottom[:3]
         gradient = Image.new("RGBA", (w, h), (0, 0, 0, 0))
         gd = ImageDraw.Draw(gradient)
         for i in range(h):
@@ -2035,7 +2625,8 @@ class ERRenderer:
             b = round(top[2] + (bottom[2] - top[2]) * ratio)
             gd.line((0, i, w - 1, i), fill=(r, g, b, 255))
         mask = Image.new("L", (w, h), 0)
-        ImageDraw.Draw(mask).rounded_rectangle((0, 0, w - 1, h - 1), radius=18, fill=255)
+        ImageDraw.Draw(mask).rounded_rectangle((0, 0, w - 1, h - 1),
+                                               radius=int(self.style.card_radius), fill=255)
         gradient.putalpha(mask)
         return gradient
 
@@ -2098,7 +2689,8 @@ class ERRenderer:
 
         char_icon = self._load_character_icon(entry.get("character_icon", ""), (icon_inner, icon_inner))
         if char_icon:
-            self._paste_icon(img, char_icon, (avatar_x + AVATAR_INSET, avatar_y + AVATAR_INSET))
+            self._paste_icon_rounded(img, char_icon, (avatar_x + AVATAR_INSET, avatar_y + AVATAR_INSET),
+                                     self._avatar_radius(AVATAR_SZ))
         self._draw_char_border(img, draw, avatar_x, avatar_y, AVATAR_SZ)
 
         cx = x + w // 2
@@ -2119,7 +2711,7 @@ class ERRenderer:
             dot_r = WEAPON_SZ // 2 + 4
             cx_w = weapon_x + WEAPON_SZ // 2
             cy_w = weapon_y + WEAPON_SZ // 2
-            self._draw_circle_aa(img, cx_w, cy_w, dot_r, (30, 30, 30))
+            self._draw_circle_aa(img, cx_w, cy_w, dot_r, self.style.rank_weapon_dot)
             self._paste_icon(img, weapon_icon, (weapon_x, weapon_y))
 
         sub_font = self._load_named_font("MiSans-Medium", 12)
@@ -2132,7 +2724,7 @@ class ERRenderer:
         # 平均加减分
         rp = entry.get("avg_mmr_gain", 0)
         rp_text = f"RP {rp:+.1f}"
-        rp_color = RENDER.accent if rp >= 0 else self.blue
+        rp_color = self.style.accent if rp >= 0 else self.blue
         rb = draw.textbbox((0, 0), rp_text, font=sub_font)
         draw.text((cx - (rb[2] - rb[0]) / 2, y + 108), rp_text, font=sub_font, fill=rp_color)
 
@@ -2179,15 +2771,7 @@ class ERRenderer:
             traits_h = HEADER_H + card_h + CONTENT_PAD
         items_h = 0
         if has_items:
-            slot_groups = item_stats
-            n_slots = len(slot_groups)
-            slots_per_col = 3
-            item_row_h = 52
-            slot_header_h = 26
-            inner_pad = 6
-            slot_card_h = slot_header_h + inner_pad * 2 + 3 * item_row_h + 4
-            col_h = min(n_slots, slots_per_col) * (slot_card_h + 6)
-            items_h = HEADER_H + col_h + CONTENT_PAD
+            items_h = self._char_items_h(item_stats)
 
         total_h = (
             self.PADDING
@@ -2201,7 +2785,7 @@ class ERRenderer:
             + FOOTER_H
         )
 
-        img = Image.new("RGBA", (self.W, total_h), self.bg + (255,))
+        img = self._new_canvas(total_h)
         draw = ImageDraw.Draw(img)
 
         y_positions = {
@@ -2298,6 +2882,7 @@ class ERRenderer:
         )
 
         output_path = self.output_dir / f"er_char_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}.png"
+        img = self._finish_canvas(img)
         img.convert("RGB").save(output_path, "PNG", optimize=False)
         
         return str(output_path)
@@ -2328,7 +2913,8 @@ class ERRenderer:
 
         char_icon = self._load_character_icon(data.get("character_icon", ""), (icon_inner, icon_inner))
         if char_icon:
-            self._paste_icon(img, char_icon, (avatar_x + AVATAR_INSET, avatar_y + AVATAR_INSET))
+            self._paste_icon_rounded(img, char_icon, (avatar_x + AVATAR_INSET, avatar_y + AVATAR_INSET),
+                                     self._avatar_radius(AVATAR_SZ))
         self._draw_char_border(img, draw, avatar_x, avatar_y, AVATAR_SZ)
 
         info_x = avatar_x + AVATAR_SZ + INFO_GAP
@@ -2444,7 +3030,7 @@ class ERRenderer:
                 if rank <= 3:
                     rank_color = self.gold
                 elif rank <= 10:
-                    rank_color = (200, 150, 40)
+                    rank_color = self.style.gold_dim
 
                 draw.text(
                     (cell_x + INNER_PAD, cell_y + RANK_OFF_Y),
@@ -2523,8 +3109,8 @@ class ERRenderer:
         draw.text((COL_SEL_CENTER - hdr3_w // 2, HEADER_Y), "选择率", font=hdr_font, fill=self.text)
         draw.text((COL_WIN_CENTER - hdr2_w // 2, HEADER_Y), "胜率", font=hdr_font, fill=self.text)
 
-        draw.line([(LEFT - 2, CONTENT_Y), (RIGHT, CONTENT_Y)], fill=(80, 80, 80), width=1)
-        draw.line([(METRIC_DIV, CONTENT_Y), (METRIC_DIV, CONTENT_Y + max_rows * row_h + ROW_GAP)], fill=(200, 180, 190), width=1)
+        draw.line([(LEFT - 2, CONTENT_Y), (RIGHT, CONTENT_Y)], fill=self.style.char_divider, width=1)
+        draw.line([(METRIC_DIV, CONTENT_Y), (METRIC_DIV, CONTENT_Y + max_rows * row_h + ROW_GAP)], fill=self.style.char_col_divider, width=1)
 
         for i in range(max_rows):
             row_y = CONTENT_Y + ROW_GAP + i * row_h
@@ -2547,7 +3133,7 @@ class ERRenderer:
                         (icon_x, row_y + (skill_icon_size - sep_h) / 2),
                         ">",
                         font=self.font_tiny,
-                        fill=(160, 160, 160),
+                        fill=self.style.skill_sep,
                     )
                     icon_x += sep_w + 3
 
@@ -2560,7 +3146,7 @@ class ERRenderer:
                     draw.rounded_rectangle(
                         (icon_x, row_y, icon_x + skill_icon_size, row_y + skill_icon_size),
                         radius=4,
-                        fill=(60, 60, 60),
+                        fill=self.style.skill_icon_bg,
                     )
 
                 badge_x = icon_x + skill_icon_size - badge_size
@@ -2568,8 +3154,8 @@ class ERRenderer:
                 draw.rounded_rectangle(
                     (badge_x, badge_y, badge_x + badge_size, badge_y + badge_size),
                     radius=3,
-                    fill=(40, 40, 40),
-                    outline=(120, 120, 120),
+                    fill=self.style.skill_badge_fill,
+                    outline=self.style.skill_badge_outline,
                     width=1,
                 )
                 ch_font = self.font_mini
@@ -2580,7 +3166,7 @@ class ERRenderer:
                     (badge_x + (badge_size - ch_w) / 2, badge_y + (badge_size - ch_h) / 2 - 1),
                     slot_char,
                     font=ch_font,
-                    fill=(255, 255, 255),
+                    fill=self.style.skill_badge_text,
                 )
 
                 icon_x += skill_icon_size + icon_gap
@@ -2588,9 +3174,9 @@ class ERRenderer:
             sel_text = f"{selection_rate:.1f}%"
             sel_color = self.text
             if selection_rate >= 30:
-                sel_color = (255, 140, 50)
+                sel_color = self.style.sel_hi
             elif selection_rate >= 15:
-                sel_color = (220, 180, 80)
+                sel_color = self.style.sel_mid
             sel_bbox = draw.textbbox((0, 0), sel_text, font=self.font_tiny)
             sel_w = sel_bbox[2] - sel_bbox[0]
             draw.text((COL_SEL_CENTER - sel_w // 2, row_y + (skill_icon_size - 12) / 2), sel_text, font=self.font_tiny, fill=sel_color)
@@ -2598,11 +3184,11 @@ class ERRenderer:
             win_text = f"{win_rate:.1f}%"
             win_color = self.text
             if win_rate >= 30:
-                win_color = (255, 80, 80)
+                win_color = self.style.win_hi
             elif win_rate >= 20:
-                win_color = (220, 150, 80)
+                win_color = self.style.win_mid
             elif win_rate >= 15:
-                win_color = (100, 200, 100)
+                win_color = self.style.win_lo
             win_bbox = draw.textbbox((0, 0), win_text, font=self.font_tiny)
             win_w = win_bbox[2] - win_bbox[0]
             draw.text((COL_WIN_CENTER - win_w // 2, row_y + (skill_icon_size - 12) / 2), win_text, font=self.font_tiny, fill=win_color)
@@ -2642,11 +3228,11 @@ class ERRenderer:
         draw.text((COL_SEL_CENTER - hdr3_w // 2, HEADER_Y), "选择率", font=header_font, fill=self.text)
         draw.text((COL_WIN_CENTER - hdr2_w // 2, HEADER_Y), "胜率", font=header_font, fill=self.text)
 
-        draw.line([(LEFT - 2, CONTENT_Y), (RIGHT, CONTENT_Y)], fill=(80, 80, 80), width=1)
+        draw.line([(LEFT - 2, CONTENT_Y), (RIGHT, CONTENT_Y)], fill=self.style.char_divider, width=1)
 
         row_h = 44
         max_rows = min(len(skills), 6)
-        draw.line([(METRIC_DIV, CONTENT_Y), (METRIC_DIV, CONTENT_Y + max_rows * row_h + ROW_GAP)], fill=(200, 180, 190), width=1)
+        draw.line([(METRIC_DIV, CONTENT_Y), (METRIC_DIV, CONTENT_Y + max_rows * row_h + ROW_GAP)], fill=self.style.char_col_divider, width=1)
 
         for i in range(max_rows):
             row_y = CONTENT_Y + ROW_GAP + i * row_h
@@ -2660,7 +3246,7 @@ class ERRenderer:
             if icon:
                 self._paste_icon(img, icon, (ICON_X, row_y + 6))
             else:
-                draw.rounded_rectangle((ICON_X, row_y + 6, ICON_X + 30, row_y + 36), radius=6, fill=(80, 80, 80))
+                draw.rounded_rectangle((ICON_X, row_y + 6, ICON_X + 30, row_y + 36), radius=6, fill=self.style.char_slot_empty)
 
             name_font = self.font_tiny if len(name) > 5 else self.font_small
             draw.text((ICON_X + 38, row_y + 8), name, font=name_font, fill=self.text)
@@ -2668,9 +3254,9 @@ class ERRenderer:
             sel_text = f"{selection_rate:.1f}%"
             sel_color = self.text
             if selection_rate >= 50:
-                sel_color = (255, 140, 50)
+                sel_color = self.style.sel_hi
             elif selection_rate >= 20:
-                sel_color = (220, 180, 80)
+                sel_color = self.style.sel_mid
             sel_bbox = draw.textbbox((0, 0), sel_text, font=self.font_tiny)
             sel_w = sel_bbox[2] - sel_bbox[0]
             draw.text((COL_SEL_CENTER - sel_w // 2, row_y + 8), sel_text, font=self.font_tiny, fill=sel_color)
@@ -2678,11 +3264,11 @@ class ERRenderer:
             win_text = f"{win_rate:.1f}%"
             win_color = self.text
             if win_rate >= 30:
-                win_color = (255, 80, 80)
+                win_color = self.style.win_hi
             elif win_rate >= 20:
-                win_color = (220, 150, 80)
+                win_color = self.style.win_mid
             elif win_rate >= 15:
-                win_color = (100, 200, 100)
+                win_color = self.style.win_lo
             win_bbox = draw.textbbox((0, 0), win_text, font=self.font_tiny)
             win_w = win_bbox[2] - win_bbox[0]
             draw.text((COL_WIN_CENTER - win_w // 2, row_y + 8), win_text, font=self.font_tiny, fill=win_color)
@@ -2726,8 +3312,8 @@ class ERRenderer:
             draw.rounded_rectangle(
                 (bx, by, bx + card_w, by + CARD_H),
                 radius=12,
-                fill=(255, 248, 251),
-                outline=self.pink_border,
+                fill=self.style.char_row_bg,
+                outline=self.style.char_row_border,
                 width=1,
             )
 
@@ -2743,7 +3329,7 @@ class ERRenderer:
             if icon:
                 self._paste_icon(img, icon, (icon_x, icon_y))
             else:
-                draw.rounded_rectangle((icon_x, icon_y, icon_x + ICON_SZ, icon_y + ICON_SZ), radius=6, fill=(80, 80, 80))
+                draw.rounded_rectangle((icon_x, icon_y, icon_x + ICON_SZ, icon_y + ICON_SZ), radius=6, fill=self.style.char_slot_empty)
 
             name_x = icon_x + ICON_SZ + 12
             name_y = by + CARD_INNER
@@ -2752,7 +3338,7 @@ class ERRenderer:
             draw.text((bx + CARD_INNER, sub_info_y), f"选择率 {selection_rate:.1f}%  |  胜率 {win_rate:.1f}%", font=self.font_small, fill=self.sub_text)
 
             line_y = sub_info_y + 28
-            draw.line([(bx + CARD_INNER, line_y), (bx + card_w - CARD_INNER, line_y)], fill=(80, 80, 80), width=1)
+            draw.line([(bx + CARD_INNER, line_y), (bx + card_w - CARD_INNER, line_y)], fill=self.style.char_divider, width=1)
 
             combinations = build.get("combinations", [])
             combo_y = line_y + 10
@@ -2777,9 +3363,9 @@ class ERRenderer:
                         if s_icon:
                             self._paste_icon(img, s_icon, (sx, combo_y))
                         else:
-                            draw.rounded_rectangle((sx, combo_y, sx + SLOT_SZ, combo_y + SLOT_SZ), radius=4, fill=(80, 80, 80))
+                            draw.rounded_rectangle((sx, combo_y, sx + SLOT_SZ, combo_y + SLOT_SZ), radius=4, fill=self.style.char_slot_empty)
                     else:
-                        draw.rounded_rectangle((sx, combo_y, sx + SLOT_SZ, combo_y + SLOT_SZ), radius=4, fill=(50, 50, 50))
+                        draw.rounded_rectangle((sx, combo_y, sx + SLOT_SZ, combo_y + SLOT_SZ), radius=4, fill=self.style.char_slot_empty2)
                     sx += SLOT_SZ + SLOT_GAP
 
                 combo_sel = combo.get("win_rate", 0)
@@ -2789,7 +3375,136 @@ class ERRenderer:
 
         return y2
 
+    # ---------- 物品统计（分组 + 芯片版） ----------
+    _ITEM_GROUP_HDR = 30
+    _ITEM_GROUP_PAD = 10
+    _ITEM_GROUP_GAP = 14
+    _ITEM_CHIP_H = 60
+    _ITEM_CHIP_GAP = 10
+    _ITEM_CHIP_MAX = 4
+
+    def _item_group_h(self, slot_group: dict) -> int:
+        n = min(len(slot_group.get("items") or []), ERRenderer._ITEM_CHIP_MAX)
+        rows = max(1, (n + 1) // 2)
+        return (ERRenderer._ITEM_GROUP_HDR + ERRenderer._ITEM_GROUP_PAD
+                + rows * ERRenderer._ITEM_CHIP_H
+                + (rows - 1) * ERRenderer._ITEM_CHIP_GAP
+                + ERRenderer._ITEM_GROUP_PAD)
+
+    def _char_items_h(self, item_stats) -> int:
+        """物品统计块高度（与绘制共用一套常量）。"""
+        HEADER_H = 44
+        CONTENT_PAD = 14
+        groups = list(item_stats or [])
+        if not getattr(self.style, "item_stat_chips", False):
+            n_slots = len(groups)
+            item_row_h = 52
+            slot_header_h = 26
+            inner_pad = 6
+            slot_card_h = slot_header_h + inner_pad * 2 + 3 * item_row_h + 4
+            col_h = min(n_slots, 3) * (slot_card_h + 6)
+            return HEADER_H + col_h + CONTENT_PAD
+        total = 0
+        rows = 0
+        for i in range(0, len(groups), 2):
+            pair = groups[i:i + 2]
+            total += max(self._item_group_h(g) for g in pair)
+            rows += 1
+        if rows > 1:
+            total += (rows - 1) * ERRenderer._ITEM_GROUP_GAP
+        return HEADER_H + total + CONTENT_PAD
+
+    def _draw_item_chip(self, img: Image.Image, draw: ImageDraw.ImageDraw,
+                        item: dict, x: int, y: int, w: int, h: int) -> None:
+        """一颗物品芯片：品质发光边框（与玩家信息里的装备一致）+ 图标 + 名称 + 选择率/胜率。"""
+        color = self._get_item_bg_color(item.get("grade", ""))
+        self._draw_item_glow_frame(img, x, y, w, h, color)
+
+        icon_sz = h - 18
+        icon = self._load_icon_fixed(item.get("icon", ""), (icon_sz, icon_sz)) if item.get("icon") else None
+        if icon is not None:
+            self._paste_icon(img, icon, (x + 8, y + (h - icon.size[1]) // 2))
+        else:
+            draw.rounded_rectangle((x + 8, y + (h - icon_sz) // 2,
+                                    x + 8 + icon_sz, y + (h + icon_sz) // 2),
+                                   radius=6, fill=self.style.char_slot_icon)
+
+        tx = x + 8 + icon_sz + 8
+        name = str(item.get("name", "") or "")
+        if len(name) > 8:
+            name = name[:7] + ".."
+        draw.text((tx, y + 9), name, font=self.font_small, fill=self.text)
+
+        sel = float(item.get("selection_rate", 0) or 0)
+        if sel >= 30:
+            sel_color = self.style.sel_hi
+        elif sel >= 15:
+            sel_color = self.style.sel_mid
+        else:
+            sel_color = self.sub_text
+        draw.text((tx, y + 34), f"选择率 {sel:.1f}%", font=self.font_mini, fill=sel_color)
+        win = item.get("win_rate")
+        if win:
+            draw.text((x + w - 10, y + 40), f"胜率 {float(win):.1f}%",
+                      font=self.font_mini, fill=self.sub_text, anchor="rm")
+
+    def _draw_item_group(self, img: Image.Image, draw: ImageDraw.ImageDraw,
+                         slot_group: dict, x: int, y: int, w: int, h: int) -> None:
+        draw.rounded_rectangle((x, y, x + w, y + h), radius=14,
+                               fill=self.style.char_row_bg,
+                               outline=self.style.char_row_border, width=1)
+        draw.text((x + 14, y + 4), str(slot_group.get("slot_name", "") or ""),
+                  font=self.font_small, fill=self.text)
+
+        items = list(slot_group.get("items") or [])[:ERRenderer._ITEM_CHIP_MAX]
+        pad = ERRenderer._ITEM_GROUP_PAD
+        chip_gap = ERRenderer._ITEM_CHIP_GAP
+        chip_w = (w - 2 * pad - chip_gap) // 2
+        chip_h = ERRenderer._ITEM_CHIP_H
+        top = y + ERRenderer._ITEM_GROUP_HDR + pad
+        for i, item in enumerate(items):
+            cx = x + pad + (i % 2) * (chip_w + chip_gap)
+            cy = top + (i // 2) * (chip_h + chip_gap)
+            self._draw_item_chip(img, draw, item, cx, cy, chip_w, chip_h)
+
+    def _draw_char_item_stats_themed(self, img: Image.Image, draw: ImageDraw.ImageDraw,
+                                     data: dict, y: int, block_h: int,
+                                     phase: str = "all") -> int:
+        x1 = self.PADDING
+        x2 = self.W - self.PADDING
+        y2 = y + block_h
+
+        if phase in ("all", "fill"):
+            self._draw_card(draw, x1, y, x2, y2, only_fill=True)
+        if phase in ("all", "top"):
+            self._draw_card(draw, x1, y, x2, y2, only_outline=True)
+        if phase == "fill":
+            return y + block_h
+
+        draw.text((x1 + 18, y + 10), "物品统计", font=self.font, fill=self.text)
+
+        groups = list(data.get("item_stats") or [])
+        if not groups:
+            draw.text((x1 + 18, y + 48), "暂无数据", font=self.font_small, fill=self.sub_text)
+            return y2
+
+        inner_x1 = x1 + 18
+        inner_w = (x2 - x1) - 36
+        gap = 16
+        group_w = (inner_w - gap) // 2
+        cursor = y + 44
+        for i in range(0, len(groups), 2):
+            pair = groups[i:i + 2]
+            row_h = max(self._item_group_h(g) for g in pair)
+            for j, g in enumerate(pair):
+                gx = inner_x1 + j * (group_w + gap)
+                self._draw_item_group(img, draw, g, gx, cursor, group_w, row_h)
+            cursor += row_h + ERRenderer._ITEM_GROUP_GAP
+        return y2
+
     def _draw_char_item_stats(self, img: Image.Image, draw: ImageDraw.ImageDraw, data: dict, y: int, block_h: int, phase: str = "all") -> int:
+        if getattr(self.style, "item_stat_chips", False):
+            return self._draw_char_item_stats_themed(img, draw, data, y, block_h, phase)
         x1 = self.PADDING
         x2 = self.W - self.PADDING
         y2 = y + block_h
@@ -2838,8 +3553,8 @@ class ERRenderer:
                 draw.rounded_rectangle(
                     (col_x, sy, col_x + col_w, sy + SLOT_CARD_H),
                     radius=12,
-                    fill=(255, 248, 251),
-                    outline=self.pink_border,
+                    fill=self.style.char_row_bg,
+                    outline=self.style.char_row_border,
                     width=1,
                 )
 
@@ -2852,7 +3567,7 @@ class ERRenderer:
                 draw.rounded_rectangle(
                     (inner_x1, inner_y1, inner_x2, inner_y2),
                     radius=10,
-                    fill=(255, 252, 253),
+                    fill=self.style.char_row_bg2,
                 )
 
                 item_start_y = inner_y1 + INNER_PAD2
@@ -2880,7 +3595,7 @@ class ERRenderer:
                             (frame_x + ITEM_PAD, frame_y + ITEM_PAD,
                              frame_x + ITEM_ICON_SZ - ITEM_PAD, frame_y + ITEM_ICON_SZ - ITEM_PAD),
                             radius=5,
-                            fill=(100, 100, 100),
+                            fill=self.style.char_slot_icon,
                         )
 
                     self._draw_item_glow_frame(img, frame_x, frame_y, ITEM_ICON_SZ, ITEM_ICON_SZ, frame_color)
@@ -2897,9 +3612,9 @@ class ERRenderer:
                     sel_text = f"{item_sel:.1f}%"
                     sel_color = self.sub_text
                     if item_sel >= 30:
-                        sel_color = (255, 140, 50)
+                        sel_color = self.style.sel_hi
                     elif item_sel >= 15:
-                        sel_color = (220, 180, 80)
+                        sel_color = self.style.sel_mid
                     draw.text((text_x, row_y + 24), sel_text, font=self.font_tiny, fill=sel_color)
 
         return y2

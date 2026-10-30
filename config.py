@@ -153,7 +153,17 @@ class RenderConfig:
     font_mini_size: int = 12
     """极小字体大小（折线图坐标 / 战术等级）"""
 
-    # ---- 颜色方案 ----
+    # ---- 主题 ----
+    theme: str = "sakura_glow"
+    """渲染主题（只改配色与光效，不动布局）：
+    legacy         = 原始粉白（默认，像素级不变）
+    neon_night     = 方案一 暗夜霓虹
+    aurora_glass   = 方案二 极光玻璃
+    luminous_light = 方案三 白昼柔光
+    sakura_glow    = 方案四 樱花柔光（柔光结构 + 原生粉白可爱风）
+    未知值自动回退 legacy。"""
+
+    # ---- 颜色方案（legacy 主题仍使用这些值）----
     bg: tuple[int, int, int] = (255, 255, 255)
     """整体背景色（RGB）"""
     card: tuple[int, int, int] = (255, 240, 245)
