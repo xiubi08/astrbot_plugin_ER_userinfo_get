@@ -105,6 +105,7 @@ class ThemeStyle:
     # ---- 装备图标 ----
     item_glow_gain: float = 1.6
     item_glow_alpha: int = 255                # 外发光不透明度（0-255）
+    item_slot_fill: Optional[RGBA] = None     # 装备格底色（None=透明）
     item_glow_blur: int = 5
     item_border_w: int = 3
     item_radius: int = 6
@@ -162,6 +163,7 @@ class ThemeStyle:
     team_sub_bar_w: int = 2
     team_sub_opacity: float = 1.0             # 次体整行不透明度（<1 表示降权）
     team_sub_inset: int = 0                   # 次体左右额外内缩（px），表达从属关系
+    team_sub_scale: float = 0                 # 次体缩放比例（0=按缩进缩放；1.0=与主体同尺寸）
     mmr_muted: Optional[RGB] = None           # 次体 RP 增减的灰色（None=sub_text）
 
     # ---- 角色评级排行 ----
@@ -786,7 +788,8 @@ SAKURA_GLOW = ThemeStyle(
     item_gap=70,
     item_row_gap=54,
     item_right_inset=224,
-    paw_opacity=0.55,
+    item_slot_fill=(255, 250, 252, 235),
+    paw_opacity=0.82,
     paw_tint=None,
     team_panel=(255, 252, 254, 255),
     team_header=(255, 240, 246, 255),
@@ -801,7 +804,8 @@ SAKURA_GLOW = ThemeStyle(
     team_sub_bar=None,
     team_sub_bar_w=0,
     team_sub_opacity=1.0,
-    team_sub_inset=20,
+    team_sub_inset=0,
+    team_sub_scale=1.0,
     row_inset=26,
     mmr_muted=(150, 147, 154),
     hero_header=True,
