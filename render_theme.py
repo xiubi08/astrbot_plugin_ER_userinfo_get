@@ -164,6 +164,7 @@ class ThemeStyle:
     team_sub_opacity: float = 1.0             # 次体整行不透明度（<1 表示降权）
     team_sub_inset: int = 0                   # 次体左右额外内缩（px），表达从属关系
     team_sub_scale: float = 0                 # 次体缩放比例（0=按缩进缩放；1.0=与主体同尺寸）
+    team_sub_wash: Optional[RGBA] = None      # 次体行底色（略微压暗，None=不铺）
     mmr_muted: Optional[RGB] = None           # 次体 RP 增减的灰色（None=sub_text）
 
     # ---- 角色评级排行 ----
@@ -799,13 +800,14 @@ SAKURA_GLOW = ThemeStyle(
     team_integrated=True,
     team_lead_bar=(255, 116, 146, 255),
     team_lead_bar2=(255, 172, 120, 255),
-    team_lead_wash=(255, 116, 146, 30),
+    team_lead_wash=(250, 212, 222, 42),
     team_lead_bar_w=5,
     team_sub_bar=None,
     team_sub_bar_w=0,
     team_sub_opacity=1.0,
     team_sub_inset=0,
     team_sub_scale=1.0,
+    team_sub_wash=(255, 116, 146, 30),
     row_inset=26,
     mmr_muted=(150, 147, 154),
     hero_header=True,

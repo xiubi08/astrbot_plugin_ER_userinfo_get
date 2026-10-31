@@ -1316,6 +1316,12 @@ class ERRenderer:
                 # 无卡：透明白底渲染，直接叠在主卡同款渐变上
                 tmp = Image.new("RGBA", (self.W, self.MATCH_H), (0, 0, 0, 0))
                 tmp_draw = ImageDraw.Draw(tmp)
+                # 次体行底色：比主体略暗一档，强化主次
+                band = getattr(self.style, "team_sub_wash", None)
+                if band is not None:
+                    blend_at(img, rounded_gradient((x2 - x1) - 16, slot_h + 8, 12,
+                                                   tuple(band[:4]), tuple(band[:4])),
+                             x1 + 8, row_y - 4)
                 self._draw_single_match(
                     tmp, tmp_draw, m["entry"], 0, phase="all",
                     with_card=False, show_meta=False, show_rank_mode=False, role="sub",
