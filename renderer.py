@@ -497,6 +497,14 @@ class ERRenderer:
 
         # ---- 中：名字 / 等级 / MMR / 段位线 / 排名 ----
         info_x = emb_x + emb_w + 30
+
+        # 优先保证左列文字有足够空间：图表放不下就压缩图表宽度，而不是让白底板盖住文字
+        _cw_style = int(getattr(st, "chart_w", 430))
+        _cw_max = x2 - 30 - info_x - 320
+        cw = _cw_style if _cw_max <= 0 else max(220, min(_cw_style, _cw_max))
+        _panel_x = x2 - cw - 24 - 6
+        _text_right = _panel_x - 12
+
         name_sz = int(getattr(st, "ref_name_size", 36))
         name_font = self._load_named_font("MiSans-Bold", name_sz)
         kr_font = self._load_named_font("NotoSansKR-Bold", name_sz)
@@ -507,7 +515,7 @@ class ERRenderer:
         player_name = player.get("name", "")
         lv_text = f"Lv.{int(player.get('level', 0) or 0)}"
         lv_w = draw.textbbox((0, 0), lv_text, font=sub_font)[2]
-        chart_left = x2 - int(getattr(st, "chart_w", 430)) - 24
+        chart_left = x2 - cw - 24
         max_name_w = chart_left - 20 - info_x - lv_w - 18
 
         # 名字过长时先缩字号，再截断加省略号，确保不会压到等级和图表
@@ -539,12 +547,14 @@ class ERRenderer:
 
         mmr_value = int(player.get("mmr", 0) or 0)
         mmr_text = f"MMR: {mmr_value}"
-        if colors:
-            self._draw_text_gradient(img, draw, (info_x, y + 74), mmr_text, mmr_font,
-                                     tuple(colors[0]), tuple(colors[1]))
-        else:
-            draw.text((info_x, y + 74), mmr_text, font=mmr_font, fill=self.text)
-
+        # 可用宽度：到折线图面板左缘为止，超出则缩字号，避免被面板遮住
+        mmr_avail = max(80, _text_right - info_x)
+        mmr_font_cur = mmr_font
+        step = 0
+        while draw.textlength(mmr_text, font=mmr_font_cur) > mmr_avail and step < 14:
+            step += 1
+            mmr_font_cur = self._load_named_font(
+                "MiSans-Bold", max(14, int(getattr(st, "ref_mmr_size", 34)) - step * 2))
         imm = int(player.get("immortal_mmr", player.get("Immortal_mmr", 0)) or 0)
         titan = int(player.get("titan_mmr", player.get("Titan_mmr", 0)) or 0)
         draw.text((info_x, y + 122), f"永恒: {imm:,} | 半神: {titan:,}",
@@ -569,11 +579,10 @@ class ERRenderer:
             lx = info_x + (g_w + 26 if g_text else 0)
             if lx + l_w > rank_right_limit and g_text:
                 lx = max(info_x, rank_right_limit - l_w)
-                draw.text((info_x, rank_y), g_text, font=rank_font, fill=self.sub_text)
             draw.text((lx, rank_y), l_text, font=rank_font, fill=self.sub_text)
 
         # ---- 右：MMR 曲线 ----
-        chart_w = int(getattr(st, "chart_w", 430))
+        chart_w = cw
         chart_h = int(getattr(st, "chart_h", 158))
         chart_x = x2 - chart_w - 24
         chart_y = y + 12
@@ -586,6 +595,13 @@ class ERRenderer:
             except Exception:
                 pass
             self._draw_chart_frame(img, chart_x - 6, chart_y - 6, chart_w + 20, chart_h + 32)
+
+            # MMR 在折线图之后画，保证不被白色底板/边框遮住
+            if colors:
+                self._draw_text_gradient(img, draw, (info_x, y + 74), mmr_text, mmr_font_cur,
+                                         tuple(colors[0]), tuple(colors[1]))
+            else:
+                draw.text((info_x, y + 74), mmr_text, font=mmr_font_cur, fill=self.text)
 
         return y2 + 12
 
@@ -622,10 +638,11 @@ class ERRenderer:
         return (int(r * 255), int(g * 255), int(b * 255))
 
     def _draw_mmr_text(self, img: Image.Image, draw: ImageDraw.ImageDraw,
-                       x: int, y: int, text: str, accent) -> None:
+                       x: int, y: int, text: str, accent, font=None) -> None:
         """MMR 数值：段位主色 → 同色提亮的横向柔色渐变（用文字做遮罩）。"""
-        size = int(getattr(self.style, "mmr_size", 0) or 0)
-        font = (self._load_named_font("MiSans-Bold", size) if size else self.font_big)
+        if font is None:
+            size = int(getattr(self.style, "mmr_size", 0) or 0)
+            font = (self._load_named_font("MiSans-Bold", size) if size else self.font_big)
         bbox = draw.textbbox((0, 0), text, font=font)
         w = max(1, bbox[2] - bbox[0])
         h = max(1, bbox[3] - bbox[1])
@@ -679,18 +696,28 @@ class ERRenderer:
 
         has_ranked_data = player.get("has_ranked_data", True)
 
+        # 折线图面板是后画的白色半透明底板，MMR 必须收在它左侧，否则会被盖住
+        _chart_left = x1 + int(getattr(self.style, "chart_inset_x", 215)) - 6
+        _mmr_avail = max(90, _chart_left - name_x - 12)
+        _mmr_font = self.font_big
+        _mmr_text = f"MMR: {int(player.get('mmr', 0) or 0)}"
+        _sz = 30
+        while draw.textlength(_mmr_text, font=_mmr_font) > _mmr_avail and _sz > 18:
+            _sz -= 2
+            _mmr_font = self._load_named_font("MiSans-Bold", _sz)
+
         if has_ranked_data:
-            _mmr_text = f"MMR: {int(player.get('mmr', 0) or 0)}"
             if getattr(self.style, "mmr_tier_gradient", False):
                 self._draw_mmr_text(
                     img, draw, name_x, name_y + 100, _mmr_text,
                     self._tier_accent_color(player.get("tier_full") or player.get("tier_icon", "")),
+                    font=_mmr_font,
                 )
             else:
                 draw.text(
                     (name_x, name_y + 100),
                     _mmr_text,
-                    font=self.font_big,
+                    font=_mmr_font,
                     fill=self.text,
                 )
         else:
@@ -701,8 +728,8 @@ class ERRenderer:
                 fill=self.sub_text,
             )
 
-        immortal_mmr = player.get("Immortal_mmr", 0) or player.get("cutoff_mmr", {}).get("Immortal_mmr", 0)
-        titan_mmr = player.get("Titan_mmr", 0) or player.get("cutoff_mmr", {}).get("Titan_mmr", 0)
+        immortal_mmr = player.get("Immortal_mmr", 0) or (player.get("cutoff_mmr") or {}).get("Immortal_mmr", 0)
+        titan_mmr = player.get("Titan_mmr", 0) or (player.get("cutoff_mmr") or {}).get("Titan_mmr", 0)
         if has_ranked_data and (immortal_mmr > 0 or titan_mmr > 0):
             draw.text(
                 (name_x, name_y + 140),
@@ -768,6 +795,21 @@ class ERRenderer:
                 tier_icon = self._load_icon(tier_icon_path, (tier_icon_size, tier_icon_size))
                 if tier_icon:
                     self._paste_icon(img, tier_icon, (tier_icon_x, tier_icon_y))
+
+        # 折线图面板/边框后画，重绘一次左侧文字，保证永远在最上层
+        if has_ranked_data and str(player.get("mmr", "")) != "":
+            self._draw_mmr_text(
+                img, draw, name_x, name_y + 100, _mmr_text,
+                self._tier_accent_color(player.get("tier_full") or player.get("tier_icon", "")),
+                font=_mmr_font,
+            )
+            if has_ranked_data and (immortal_mmr > 0 or titan_mmr > 0):
+                draw.text(
+                    (name_x, name_y + 140),
+                    f"永恒: {immortal_mmr:,} | 半神: {titan_mmr:,}",
+                    font=self.font_tiny,
+                    fill=self.sub_text,
+                )
 
         # ===== 段位名称 =====
         tier_name = player.get("tier_name", "")
