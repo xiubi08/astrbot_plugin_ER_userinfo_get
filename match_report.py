@@ -26,7 +26,10 @@ W = 1080
 PAD = 20
 CARD_W = W - PAD * 2
 
-MODE_NAMES = {2: "三人", 6: "钴协议", 11: "钴联盟"}
+MODE_NAMES = {
+    1: "一般", 2: "匹配", 3: "排位", 4: "自定义",
+    6: "钴协议", 8: "双人", 9: "孤狼", 10: "赛季", 11: "钴联盟",
+}
 TEAM_MODE_NAMES = {1: "孤狼", 2: "双人", 3: "三人", 4: "四人"}
 
 # 概要里重点展示的字段（附录里是全部 331 个）
@@ -260,6 +263,7 @@ class MatchReportRenderer:
         per = max(len(v) for v in teams.values())
         return {
             "mode": MODE_NAMES.get(mode_id, f"模式{mode_id}"),
+            "mode_label": MODE_NAMES.get(mode_id, f"模式{mode_id}"),
             "mode_id": mode_id,
             "team_mode": TEAM_MODE_NAMES.get(team_id, f"队{team_id}"),
             "team_id": team_id,

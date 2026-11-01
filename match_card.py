@@ -367,10 +367,7 @@ class MatchCardV6(MatchReportRenderer):
             draw.rectangle((bx, y + 6, bx + 2, y + hdr - 5), fill=self.c["accent"])
             draw.text((bx + 8, y + 3), f"Team {team_no}",
                       font=self.font("MiSans-Bold", 12), fill=self.c["ink"])
-            tag = "胜" if win else "负"
-            tx = bx + 8 + draw.textlength(f"Team {team_no}", font=self.font("MiSans-Bold", 12)) + 8
-            draw.text((tx, y + 4), tag, font=self.font("MiSans-Bold", 11),
-                      fill=self.c["accent"] if win else (148, 163, 184))
+            # 三人/孤狼不显示胜负
         else:
             # 钴协议：只有两支队伍，不显示 Team 编号，仅突出胜负
             self._result_pill(img, draw, bx, y + 2, 22, win, "胜利" if win else "失败")
