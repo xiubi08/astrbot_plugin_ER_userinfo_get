@@ -1854,11 +1854,19 @@ class ERProfilePlugin(Star):
     def _render_match_cards(self, detail: dict[str, Any], game_id: int) -> Path:
         from .match_card import MatchCardV6
 
+        # 图标目录：持久化目录优先（更新资源下载到这里），包内 data 兜底
+        roots = []
+        for attr in ("assets_dir", "bundled_assets_dir"):
+            p = getattr(self.assets, attr, None)
+            if p:
+                roots.append(Path(p))
+        roots.append(self.plugin_dir / "data" / "assets")
+
         renderer = MatchCardV6(
             self.fonts_dir,
             theme=getattr(RENDER, "theme", "sakura_glow"),
             scale=float(getattr(RENDER, "match_scale", 2.0)),
-            assets_dir=self.plugin_dir / "data" / "assets",
+            assets_dir=roots,
         )
         out = self.output_dir / f"match_overview_{game_id}.png"
         renderer.render_overview(detail, out)

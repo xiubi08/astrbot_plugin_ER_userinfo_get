@@ -64,7 +64,7 @@ def _fmt(v: Any, limit: int = 46) -> str:
 
 class MatchReportRenderer:
     def __init__(self, fonts_dir: Path | str, theme: str | None = None,
-                 assets_dir: Path | str | None = None):
+                 assets_dir=None):
         self.fonts_dir = Path(fonts_dir)
         if assets_dir is None:
             for cand in (self.fonts_dir.parent / "data" / "assets",
@@ -73,7 +73,13 @@ class MatchReportRenderer:
                 if cand.exists():
                     assets_dir = cand
                     break
-        self.assets_dir = Path(assets_dir) if assets_dir else None
+        # assets_dir 可以是单个目录，也可以是候选目录列表（按顺序查找）
+        if isinstance(assets_dir, (list, tuple, set)):
+            roots = [Path(p) for p in assets_dir if p]
+        else:
+            roots = [Path(assets_dir)] if assets_dir else []
+        self.asset_roots = roots
+        self.assets_dir = roots[0] if roots else None
         self._icons: dict[tuple[str, int], Image.Image | None] = {}
         self.style = resolve_theme(theme or RENDER.theme or "sakura_glow")
         self._fonts: dict[tuple[str, int], ImageFont.FreeTypeFont] = {}
@@ -117,11 +123,16 @@ class MatchReportRenderer:
         cover=True 时等比缩放到最小边=size 后居中裁成 size×size（装备用，尺寸绝对统一）；
         cover=False 时按比例缩进 size 方框内（角色立绘用，避免切头）。
         """
-        if not self.assets_dir or ident in (None, "", 0):
+        if not self.asset_roots or ident in (None, "", 0):
             return None
         key = (str(ident), size, cover)
         if key not in self._icons:
-            path = self.assets_dir / sub / f"{ident}.png"
+            path = None
+            for root in self.asset_roots:
+                cand = root / sub / f"{ident}.png"
+                if cand.exists():
+                    path = cand
+                    break
             im = None
             if path.exists():
                 try:
