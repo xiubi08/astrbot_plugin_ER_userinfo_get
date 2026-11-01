@@ -1796,6 +1796,7 @@ class ERProfilePlugin(Star):
         cache_key = hashlib.md5(cache_raw.encode("utf-8")).hexdigest()
         cached = _RESULT_IMAGE_CACHE.get(cache_key)
         if cached and Path(cached).exists():
+            yield event.plain_result(f"对局ID {gid} 的详情来啦喵～")
             yield event.image_result(str(cached))
             return
 
