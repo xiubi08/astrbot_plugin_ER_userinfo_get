@@ -1779,10 +1779,12 @@ class ERProfilePlugin(Star):
     # =========================
     # 查询对局（单局战报卡）
     # =========================
-    @filter.command("查询对局")
+    @filter.regex(r"^查询对局\s*\d+\s*$")
     @_resource_busy_guard
-    async def er_match_overview(self, event: AstrMessageEvent, game_id: str = ""):
-        gid_text = "".join(ch for ch in str(game_id) if ch.isdigit())
+    async def er_match_overview(self, event: AstrMessageEvent):
+        message_str = event.message_str.strip()
+        matched = re.search(r"(\d+)", message_str)
+        gid_text = matched.group(1) if matched else ""
         if not gid_text:
             yield event.plain_result(
                 "用法：查询对局 <对局ID>\n"
