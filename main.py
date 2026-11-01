@@ -708,6 +708,30 @@ class ERProfilePlugin(Star):
             logger.warning(f"[ER战绩] 图文消息发送失败（已降级）: {e}")
             return False
 
+    async def _send_qq_match_card(self, event: AstrMessageEvent, image_path: str) -> bool:
+        """QQ 官方平台：战报卡与按钮合成一条图文消息，避免图片/按钮拆成两条。"""
+        try:
+            if not (self._qq_buttons_enabled() and self._qq_inline_card_enabled()):
+                return False
+            if not qq_buttons_available():
+                return False
+            if get_platform_name(event) not in QQ_OFFICIAL_NAMES:
+                return False
+            self._install_qq_welcome_hooks()
+            rows = [[("帮助", "/帮助"), ("全部指令", "/指令")]]
+            return bool(
+                await asyncio.wait_for(
+                    send_image_with_buttons(self.context, event, image_path, rows),
+                    timeout=QQ_CARD_TIMEOUT,
+                )
+            )
+        except asyncio.TimeoutError:
+            logger.warning("[ER战绩] 战报卡图文消息发送超时（降级为图片+按钮两条）")
+            return False
+        except Exception as e:
+            logger.warning(f"[ER战绩] 战报卡图文消息发送失败（已降级）: {e}")
+            return False
+
     async def _attach_qq_result_buttons(
         self,
         event: AstrMessageEvent,
@@ -1798,7 +1822,8 @@ class ERProfilePlugin(Star):
         cache_key = hashlib.md5(cache_raw.encode("utf-8")).hexdigest()
         cached = _RESULT_IMAGE_CACHE.get(cache_key)
         if cached and Path(cached).exists():
-            yield event.image_result(str(cached))
+            if not await self._send_qq_match_card(event, str(cached)):
+                yield event.image_result(str(cached))
             return
 
         try:
@@ -1819,7 +1844,8 @@ class ERProfilePlugin(Star):
             return
 
         _RESULT_IMAGE_CACHE.set(cache_key, str(out), CACHE.result_image_ttl)
-        yield event.image_result(str(out))
+        if not await self._send_qq_match_card(event, str(out)):
+            yield event.image_result(str(out))
 
     def _match_season_ids(self) -> list[int]:
         """候选赛季 ID（新→旧），用于按 gameId 反查对局。"""
