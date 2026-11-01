@@ -1798,7 +1798,7 @@ class ERProfilePlugin(Star):
             yield event.image_result(str(cached))
             return
 
-        yield event.plain_result(f"正在生成对局 {gid} 的战报卡…")
+        yield event.plain_result(f"正在查询对局ID {gid} 的详情喵…")
 
         try:
             detail = await asyncio.to_thread(self._fetch_match_detail, gid)
@@ -1807,7 +1807,7 @@ class ERProfilePlugin(Star):
             detail = None
 
         if not detail:
-            yield event.plain_result(f"未找到对局 {gid}，请确认对局 ID 是否正确。")
+            yield event.plain_result(f"没找到对局ID {gid} 的详情喵…请确认对局 ID 是否正确～")
             return
 
         try:
