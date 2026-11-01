@@ -151,6 +151,7 @@ class ThemeStyle:
     ref_mmr_size: int = 34                    # 新版 MMR 字号
     ref_sub_size: int = 16                    # 新版等级/段位线字号
     ref_rank_size: int = 14                   # 新版排名行字号
+    ref_tier_name_size: int = 18              # 新版段位名字号（徽章下方）
     tier_palette: dict = field(default_factory=dict)  # 段位名 -> (浅, 深) 两色
     section_header: Optional[RGBA] = None     # 标题底：左端色（None=不画）
     section_header2: Optional[RGBA] = None    # 标题底：右端色（None=同左端）
@@ -834,11 +835,12 @@ SAKURA_GLOW = ThemeStyle(
     header_h=204,
     header_gap=6,
     header_layout="ref",
-    ref_tier_h=140,
+    ref_tier_h=124,
     ref_name_size=36,
     ref_mmr_size=34,
     ref_sub_size=16,
     ref_rank_size=14,
+    ref_tier_name_size=22,
     tier_palette={
         "铁阎": ((90, 96, 100), (23, 30, 36)),
         "铜魂": ((194, 137, 100), (150, 80, 36)),

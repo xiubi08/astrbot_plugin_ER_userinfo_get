@@ -482,6 +482,19 @@ class ERRenderer:
             if icon is not None:
                 self._paste_icon(img, icon, (emb_x + (emb_w - icon.size[0]) // 2, emb_y))
 
+        # 徽章下方：段位名（含小段位，如「灭钻 I」「星陨 IV」）
+        tier_name = str(player.get("tier_name", "") or "")
+        if has_ranked and tier_name:
+            tn_font = self._load_named_font("MiSans-Bold",
+                                            int(getattr(st, "ref_tier_name_size", 18)))
+            tb = draw.textbbox((0, 0), tier_name, font=tn_font)
+            tw, th = tb[2] - tb[0], tb[3] - tb[1]
+            tx = emb_x + (emb_w - tw) // 2
+            ty = emb_y + emb_h + 2 - tb[1]
+            if ty + th > y2 - 8:
+                ty = y2 - 8 - th - tb[1]
+            draw.text((tx, ty), tier_name, font=tn_font, fill=self.text)
+
         # ---- 中：名字 / 等级 / MMR / 段位线 / 排名 ----
         info_x = emb_x + emb_w + 30
         name_sz = int(getattr(st, "ref_name_size", 36))
