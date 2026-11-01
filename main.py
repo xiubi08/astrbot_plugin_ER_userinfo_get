@@ -1787,8 +1787,7 @@ class ERProfilePlugin(Star):
         gid_text = matched.group(1) if matched else ""
         if not gid_text:
             yield event.plain_result(
-                "用法：查询对局 <对局ID>\n"
-                "对局ID 可在 dak.gg 战绩详情页链接中找到（形如 66972454）。"
+                "用法：查询对局 <对局ID>\n例如：查询对局 65120738"
             )
             return
 
