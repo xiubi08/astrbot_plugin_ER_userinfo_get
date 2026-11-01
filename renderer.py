@@ -457,7 +457,12 @@ class ERRenderer:
         # 段位图标/段位名整体上移，顶端与玩家名顶端对齐（原先是垂直居中）
         emb_y = y + 22
         tier_path = player.get("tier_full") or player.get("tier_icon", "")
-        if has_ranked and tier_path:
+        if not tier_path:
+            try:
+                tier_path = self.assets.get_tier_full_path(0) if getattr(self, "assets", None) else ""
+            except Exception:
+                tier_path = ""
+        if tier_path:
             icon = self._load_icon_fixed(tier_path, (emb_w, emb_h))
             if icon is not None:
                 self._paste_icon(img, icon, (emb_x + (emb_w - icon.size[0]) // 2, emb_y))
@@ -526,7 +531,7 @@ class ERRenderer:
                   lv_text, font=sub_font, fill=self.sub_text)
 
         mmr_value = int(player.get("mmr", 0) or 0)
-        mmr_text = f"MMR: {mmr_value}"
+        mmr_text = f"MMR: {mmr_value}" if has_ranked else "MMR: 段位未鉴定"
         # 可用宽度：到折线图面板左缘为止，超出则缩字号，避免被面板遮住
         mmr_avail = max(80, _text_right - info_x)
         mmr_font_cur = mmr_font
@@ -576,12 +581,15 @@ class ERRenderer:
                 pass
             self._draw_chart_frame(img, chart_x - 6, chart_y - 6, chart_w + 20, chart_h + 32)
 
-            # MMR 在折线图之后画，保证不被白色底板/边框遮住
-            if colors:
-                self._draw_text_gradient(img, draw, (info_x, y + 74), mmr_text, mmr_font_cur,
-                                         tuple(colors[0]), tuple(colors[1]))
-            else:
-                draw.text((info_x, y + 74), mmr_text, font=mmr_font_cur, fill=self.text)
+            pass
+
+        # MMR 行：有段位用渐变字，未定级用灰字；始终画在折线图之后（最上层）
+        if colors and has_ranked:
+            self._draw_text_gradient(img, draw, (info_x, y + 74), mmr_text, mmr_font_cur,
+                                     tuple(colors[0]), tuple(colors[1]))
+        else:
+            draw.text((info_x, y + 74), mmr_text, font=mmr_font_cur,
+                      fill=self.text if has_ranked else self.sub_text)
 
         return y2 + 12
 
@@ -703,8 +711,8 @@ class ERRenderer:
         else:
             draw.text(
                 (name_x, name_y + 100),
-                "段位未鉴定",
-                font=self.font_big,
+                "MMR: 段位未鉴定",
+                font=_mmr_font,
                 fill=self.sub_text,
             )
 
