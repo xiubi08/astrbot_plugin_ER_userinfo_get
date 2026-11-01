@@ -313,11 +313,6 @@ class MatchCardV6(MatchReportRenderer):
         f1 = self.font("MiSans-Regular", 12)
         draw.text((x1 + 18, y + 40), self.fit(draw, line, f1, CARD_W - 280), font=f1, fill=self.c["sub"])
 
-        tk = sum(int(m.get("playerKill", 0) or 0) for m in ms)
-        td = sum(int(m.get("damageToPlayer", 0) or 0) for m in ms)
-        agg = f"总击杀 {tk} · 总输出 {td:,}"
-        f3 = self.font("MiSans-Bold", 13)
-        draw.text((x2 - 16 - draw.textlength(agg, font=f3), y + 22), agg, font=f3, fill=self.c["ink"])
         return y + self.HEAD_H + 8
 
     # ---------------- 两栏 ----------------
@@ -403,9 +398,10 @@ class MatchCardV6(MatchReportRenderer):
         nick, nf = self._autofit(draw, str(m.get("nickname", ""))[:16], 13, 112, 8)
         draw.text((tx, ry + 9), nick, font=nf, fill=self.c["ink"])
         tag = self._char_label(m)
-        tw = draw.textlength(tag, font=self.font("MiSans-Regular", 9)) + 10
-        draw.rounded_rectangle((tx, ry + 28, tx + tw, ry + 42), radius=7, fill=self.c["pale"])
-        draw.text((tx + 5, ry + 30), tag, font=self.font("MiSans-Regular", 9), fill=self.c["deep"])
+        tf = self.font("MiSans-Regular", 10)
+        tw = draw.textlength(tag, font=tf) + 12
+        draw.rounded_rectangle((tx - 4, ry + 27, tx - 4 + tw, ry + 43), radius=8, fill=self.c["pale"])
+        draw.text((tx, ry + 30), self.fit(draw, tag, tf, 150), font=tf, fill=self.c["deep"])
 
         # 武器 / 战术 / 主潜 / 副潜（2×2，无边框）
         self._icon_grid(img, draw, m, x1 + 186, ry + 6, 26, 4)
@@ -498,9 +494,10 @@ class MatchCardV6(MatchReportRenderer):
         nick, nf = self._autofit(draw, str(m.get("nickname", ""))[:14], 11, 86, 8)
         draw.text((tx, ry + 7), nick, font=nf, fill=self.c["ink"])
         tag = self._char_label(m)
-        tw = draw.textlength(tag, font=self.font("MiSans-Regular", 8)) + 8
-        draw.rounded_rectangle((tx, ry + 24, tx + tw, ry + 35), radius=6, fill=self.c["pale"])
-        draw.text((tx + 4, ry + 26), tag, font=self.font("MiSans-Regular", 8), fill=self.c["deep"])
+        tf = self.font("MiSans-Regular", 9)
+        tw = draw.textlength(tag, font=tf) + 10
+        draw.rounded_rectangle((tx - 3, ry + 23, tx - 3 + tw, ry + 35), radius=6, fill=self.c["pale"])
+        draw.text((tx, ry + 25), self.fit(draw, tag, tf, 96), font=tf, fill=self.c["deep"])
 
         # 2×2 图标（无边框）
         self._icon_grid(img, draw, m, x1 + 132, ry + 5, 18, 3, with_level=False)
@@ -655,6 +652,37 @@ class MatchCardV6(MatchReportRenderer):
                   Image.composite(ic.getchannel("A"), Image.new("L", ic.size, 0), mask))
         return True
 
+
+    def _load_path_icon(self, path: str, size: int):
+        """按绝对路径加载图标（潜能组图标等），带缓存。"""
+        if not path:
+            return None
+        S = self.S
+        px = max(1, int(round(size * S)))
+        key = ("path", str(path), px)
+        if key not in self._icons:
+            im = None
+            try:
+                src = Image.open(path).convert("RGBA")
+                w0, h0 = src.size
+                sc = min(px / max(1, w0), px / max(1, h0))
+                im = src.resize((max(1, round(w0 * sc)), max(1, round(h0 * sc))), Image.LANCZOS)
+            except Exception:
+                im = None
+            self._icons[key] = im
+        return self._icons[key]
+
+    def _circle_path(self, img, draw, path, x, y, size):
+        ic = self._load_path_icon(path, size)
+        if ic is None:
+            return False
+        S = self.S
+        mask = Image.new("L", ic.size, 0)
+        ImageDraw.Draw(mask).ellipse((0, 0, ic.width - 1, ic.height - 1), fill=255)
+        img.paste(ic, (int(round(x * S)), int(round(y * S))),
+                  Image.composite(ic.getchannel("A"), Image.new("L", ic.size, 0), mask))
+        return True
+
     def _icon_grid(self, img, draw, m, x, y, cell, gap, with_level=True):
         """2×2：武器（方形深底）+ 战术（圆形带等级）/ 主潜能 + 副潜能（圆形）。"""
         S = self.S
@@ -677,8 +705,12 @@ class MatchCardV6(MatchReportRenderer):
                 bx, by = tx2 + cell - bw + 1, y + cell - 9
                 draw.rounded_rectangle((bx, by, bx + bw, by + 11), radius=3, fill=(255, 252, 254))
                 draw.text((bx + 3, by + 1), str(lv), font=f, fill=self.c["deep"])
-        self._circle_icon(img, draw, "trait_skills", m.get("traitFirstCore"), x, y + cell + gap, cell)
-        self._circle_icon(img, draw, "trait_skills", sub2, tx2, y + cell + gap, cell)
+        core_path = m.get("_trait_core_icon")
+        if not (core_path and self._circle_path(img, draw, core_path, x, y + cell + gap, cell)):
+            self._circle_icon(img, draw, "trait_skills", m.get("traitFirstCore"), x, y + cell + gap, cell)
+        grp_path = m.get("_trait_group_icon")
+        if not (grp_path and self._circle_path(img, draw, grp_path, tx2, y + cell + gap, cell)):
+            self._circle_icon(img, draw, "trait_skills", sub2, tx2, y + cell + gap, cell)
 
     def _bar(self, img, draw, x, y, w, h, ratio, kind="dmg"):
         """进度条：深色渐变 + 柔光。kind=dmg 粉 / tak 水蓝。"""

@@ -1882,6 +1882,20 @@ class ERProfilePlugin(Star):
             except Exception:
                 char_names[cid] = ""
 
+        # 潜能图标：主潜能用 trait 图标，副潜能用「进攻型/混沌型」组图标（同玩家卡）
+        for entry in detail.get("matches") or []:
+            try:
+                core = entry.get("traitFirstCore")
+                if core:
+                    entry["_trait_core_icon"] = self.assets.get_trait_skill_icon_path(int(core))
+                subs = entry.get("traitSecondSub") or []
+                if subs:
+                    group = self.assets.get_trait_skill(int(subs[0])).get("group", "")
+                    if group:
+                        entry["_trait_group_icon"] = self.assets.get_trait_group_icon_path(group)
+            except Exception:
+                continue
+
         renderer = MatchCardV6(
             self.fonts_dir,
             theme=getattr(RENDER, "theme", "sakura_glow"),
