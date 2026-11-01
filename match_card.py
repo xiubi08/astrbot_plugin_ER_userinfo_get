@@ -90,6 +90,7 @@ class _ScaledDraw:
 class MatchCardV6(MatchReportRenderer):
     def __init__(self, *a, **kw):
         self.S = float(kw.pop("scale", 2.5))
+        self.char_names = kw.pop("char_names", None) or {}
         super().__init__(*a, **kw)
         st = self.style
         self.c = {
@@ -404,7 +405,7 @@ class MatchCardV6(MatchReportRenderer):
         tx = x1 + 64
         nick, nf = self._autofit(draw, str(m.get("nickname", ""))[:16], 13, 112, 8)
         draw.text((tx, ry + 9), nick, font=nf, fill=self.c["ink"])
-        tag = f"角色{m.get('characterNum')}"
+        tag = self._char_label(m)
         tw = draw.textlength(tag, font=self.font("MiSans-Regular", 9)) + 10
         draw.rounded_rectangle((tx, ry + 28, tx + tw, ry + 42), radius=7, fill=self.c["pale"])
         draw.text((tx + 5, ry + 30), tag, font=self.font("MiSans-Regular", 9), fill=self.c["deep"])
@@ -499,7 +500,7 @@ class MatchCardV6(MatchReportRenderer):
         tx = x1 + 48
         nick, nf = self._autofit(draw, str(m.get("nickname", ""))[:14], 11, 86, 8)
         draw.text((tx, ry + 7), nick, font=nf, fill=self.c["ink"])
-        tag = f"角色{m.get('characterNum')}"
+        tag = self._char_label(m)
         tw = draw.textlength(tag, font=self.font("MiSans-Regular", 8)) + 8
         draw.rounded_rectangle((tx, ry + 24, tx + tw, ry + 35), radius=6, fill=self.c["pale"])
         draw.text((tx + 4, ry + 26), tag, font=self.font("MiSans-Regular", 8), fill=self.c["deep"])
@@ -584,6 +585,17 @@ class MatchCardV6(MatchReportRenderer):
         f = self.font_for(t, min_size, bold=bold)
         return self.fit(draw, t, f, max_w), f
 
+
+
+    def _char_label(self, m) -> str:
+        """角色名优先取持久化 characters.json，缺失时退回「角色<id>」。"""
+        cid = m.get("characterNum")
+        try:
+            cid = int(cid)
+        except (TypeError, ValueError):
+            return "角色"
+        name = self.char_names.get(cid)
+        return str(name) if name else f"角色{cid}"
 
     def _result_pill(self, img, draw, x, y, h, win, text):
         """胜负胶囊：渐变底 + 白字。"""

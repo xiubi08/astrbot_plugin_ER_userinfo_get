@@ -1869,11 +1869,25 @@ class ERProfilePlugin(Star):
             info = MatchCardV6.mode_of(detail) if hasattr(MatchCardV6, "mode_of") else {}
         except Exception:
             info = {}
+        char_names = {}
+        for entry in detail.get("matches") or []:
+            try:
+                cid = int(entry.get("characterNum"))
+            except (TypeError, ValueError):
+                continue
+            if cid in char_names:
+                continue
+            try:
+                char_names[cid] = self.assets.get_character_name(cid) or ""
+            except Exception:
+                char_names[cid] = ""
+
         renderer = MatchCardV6(
             self.fonts_dir,
             theme=getattr(RENDER, "theme", "sakura_glow"),
             scale=scale,
             assets_dir=roots,
+            char_names=char_names,
         )
         try:
             height = renderer._height(info, renderer._two_col(info)) if info else 0
@@ -1887,6 +1901,7 @@ class ERProfilePlugin(Star):
                 theme=getattr(RENDER, "theme", "sakura_glow"),
                 scale=scale,
                 assets_dir=roots,
+                char_names=char_names,
             )
 
         out = self.output_dir / f"match_overview_{game_id}.png"
