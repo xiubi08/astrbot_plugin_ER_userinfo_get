@@ -350,21 +350,24 @@ class MatchCardV6(MatchReportRenderer):
         img.alpha_composite(hb, (int(round((x1 + 6) * S)), int(round((y + 3) * S))))
 
         if narrow:
-            badge = 20
-            bx0 = x1 + 8
-            self._rank_badge(img, draw, bx0, y + 1, badge, best)
-            bx = bx0 + badge + 10
+            badge = 18
+            bx0 = x1 + 9
+            self._rank_badge(img, draw, bx0, y + 4, badge, best)
+            bx = bx0 + badge + 9
         else:
             # 钴协议只有两队，不显示名次，仅保留 Team 与胜负
             bx = x1 + 14
-        draw.rectangle((bx, y + 6, bx + 2, y + hdr - 5), fill=self.c["accent"])
-        draw.text((bx + 8, y + (3 if narrow else 3)), f"Team {team_no}",
-                  font=self.font("MiSans-Bold", 12 if narrow else 14), fill=self.c["ink"])
-        if not narrow:
-            tag = "胜利" if win else "失败"
-            tx = bx + 8 + draw.textlength(f"Team {team_no}", font=self.font("MiSans-Bold", 14)) + 10
-            draw.text((tx, y + 4), tag, font=self.font("MiSans-Bold", 12),
+        if narrow:
+            draw.rectangle((bx, y + 6, bx + 2, y + hdr - 5), fill=self.c["accent"])
+            draw.text((bx + 8, y + 3), f"Team {team_no}",
+                      font=self.font("MiSans-Bold", 12), fill=self.c["ink"])
+            tag = "胜" if win else "负"
+            tx = bx + 8 + draw.textlength(f"Team {team_no}", font=self.font("MiSans-Bold", 12)) + 8
+            draw.text((tx, y + 4), tag, font=self.font("MiSans-Bold", 11),
                       fill=self.c["accent"] if win else (148, 163, 184))
+        else:
+            # 钴协议：只有两支队伍，不显示 Team 编号，仅突出胜负
+            self._result_pill(img, draw, bx, y + 2, 22, win, "胜利" if win else "失败")
 
             k = sum(int(m.get("playerKill", 0) or 0) for m in members)
             a = sum(int(m.get("playerAssistant", 0) or 0) for m in members)
@@ -575,6 +578,23 @@ class MatchCardV6(MatchReportRenderer):
                 return t, f
         f = self.font_for(t, min_size, bold=bold)
         return self.fit(draw, t, f, max_w), f
+
+
+    def _result_pill(self, img, draw, x, y, h, win, text):
+        """胜负胶囊：渐变底 + 白字。"""
+        S = self.S
+        f = self.font("MiSans-Bold", int(round(h * 0.6)))
+        tw = draw.textlength(text, font=f)
+        w = int(tw + h * 1.1)
+        if win:
+            c1, c2 = (255, 104, 134), (255, 170, 116)
+        else:
+            c1, c2 = (150, 168, 196), (112, 132, 164)
+        pill = rounded_gradient(int(round(w * S)), int(round(h * S)), int(round(h * S)) // 2,
+                                tuple(c1) + (255,), tuple(c2) + (255,))
+        if pill is not None:
+            img.alpha_composite(pill, (int(round(x * S)), int(round(y * S))))
+        draw.text((x + (w - tw) / 2, y + h * 0.13), text, font=f, fill=(255, 255, 255))
 
     def _rank_badge(self, img, draw, x, y, size, rank):
         """名次徽章：金银铜渐变的圆形 + 深色数字。"""
