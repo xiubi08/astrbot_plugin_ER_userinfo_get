@@ -26,7 +26,7 @@ from .mapper import DataMapper
 from .renderer import ERRenderer
 from .get_image import main as refresh_data
 from . import get_image
-from .config import NETWORK, CACHE, LOCK, QUERY
+from .config import NETWORK, CACHE, LOCK, QUERY, RENDER
 from .command_registry import to_panel_items as registry_panel_items
 from .platform_compat import QQ_OFFICIAL_NAMES, get_platform_name, get_qq_official_clients
 from .qq_official_button import (
@@ -1733,6 +1733,11 @@ class ERProfilePlugin(Star):
             "   例：查询角色 暗器 扎希尔 in1000\n"
             "   段位：修罗/灭钻/星陨/无瑕/in1000\n"
             "\n"
+            "◆ 对局战报卡\n"
+            " · 查询对局 <对局ID>\n"
+            "   例：查询对局 66972454\n"
+            "   *对局ID取自 dak.gg 战绩详情页链接\n"
+            "\n"
             "◆ 角色评级排行\n"
             " · 角色评级\n"
             " · 角色评级 <段位>\n"
@@ -1771,6 +1776,93 @@ class ERProfilePlugin(Star):
                 yield event.plain_result(text)
             return
         yield event.plain_result(text)
+
+    # =========================
+    # 查询对局（单局战报卡）
+    # =========================
+    @filter.command("查询对局")
+    @_resource_busy_guard
+    async def er_match_overview(self, event: AstrMessageEvent, game_id: str = ""):
+        gid_text = "".join(ch for ch in str(game_id) if ch.isdigit())
+        if not gid_text:
+            yield event.plain_result(
+                "用法：查询对局 <对局ID>\n"
+                "对局ID 可在 dak.gg 战绩详情页链接中找到（形如 66972454）。"
+            )
+            return
+
+        gid = int(gid_text)
+        cache_raw = f"matchcard|{gid}|{getattr(RENDER, 'match_scale', 2.0)}"
+        cache_key = hashlib.md5(cache_raw.encode("utf-8")).hexdigest()
+        cached = _RESULT_IMAGE_CACHE.get(cache_key)
+        if cached and Path(cached).exists():
+            yield event.image_result(str(cached))
+            return
+
+        yield event.plain_result(f"正在生成对局 {gid} 的战报卡…")
+
+        try:
+            detail = await asyncio.to_thread(self._fetch_match_detail, gid)
+        except Exception as e:
+            logger.warning(f"[ER战绩] 对局详情获取失败(game={gid}): {e}")
+            detail = None
+
+        if not detail:
+            yield event.plain_result(f"未找到对局 {gid}，请确认对局 ID 是否正确。")
+            return
+
+        try:
+            out = await asyncio.to_thread(self._render_match_cards, detail, gid)
+        except Exception as e:
+            logger.error(f"[ER战绩] 对局战报卡渲染失败(game={gid}): {e}")
+            yield event.plain_result("战报卡渲染失败，请稍后重试或查看日志。")
+            return
+
+        _RESULT_IMAGE_CACHE.set(cache_key, str(out), CACHE.result_image_ttl)
+        yield event.image_result(str(out))
+
+    def _match_season_ids(self) -> list[int]:
+        """候选赛季 ID（新→旧），用于按 gameId 反查对局。"""
+        cached = getattr(self, "_season_ids_cache", None)
+        if cached:
+            return cached
+        out: list[int] = []
+        try:
+            for item in self.api.get_seasons() or []:
+                for key in ("seasonId", "season", "id"):
+                    val = item.get(key)
+                    if val is not None and str(val).isdigit():
+                        out.append(int(val))
+                        break
+        except Exception as e:
+            logger.debug(f"[ER战绩] 赛季列表获取失败，降级为当前赛季: {e}")
+        ids = sorted(set(out), reverse=True)[:8] or [0]
+        self._season_ids_cache = ids
+        return ids
+
+    def _fetch_match_detail(self, game_id: int) -> Optional[dict[str, Any]]:
+        """按 gameId 逐个赛季尝试拉取单局全员数据（玩家名可用占位符）。"""
+        for sid in self._match_season_ids():
+            try:
+                detail = self.api.get_match_detail("ER", sid, game_id)
+            except Exception:
+                continue
+            if isinstance(detail, dict) and detail.get("matches"):
+                return detail
+        return None
+
+    def _render_match_cards(self, detail: dict[str, Any], game_id: int) -> Path:
+        from .match_card import MatchCardV6
+
+        renderer = MatchCardV6(
+            self.fonts_dir,
+            theme=getattr(RENDER, "theme", "sakura_glow"),
+            scale=float(getattr(RENDER, "match_scale", 2.0)),
+            assets_dir=self.plugin_dir / "data" / "assets",
+        )
+        out = self.output_dir / f"match_overview_{game_id}.png"
+        renderer.render_overview(detail, out)
+        return out
 
     @filter.command("无@唤醒教程")
     @_resource_busy_guard

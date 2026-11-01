@@ -155,6 +155,8 @@ class RenderConfig:
 
     # ---- 主题 ----
     theme: str = "sakura_glow"
+    # 对局战报卡渲染倍率（1080 逻辑宽 × scale）
+    match_scale: float = 2.0
     """渲染主题（只改配色与光效，不动布局）：
     legacy         = 原始粉白（默认，像素级不变）
     neon_night     = 方案一 暗夜霓虹
