@@ -349,11 +349,14 @@ class MatchCardV6(MatchReportRenderer):
         hb.putalpha(mask)
         img.alpha_composite(hb, (int(round((x1 + 6) * S)), int(round((y + 3) * S))))
 
-        badge = 24 if narrow else 34
-        bx0 = x1 + (8 if narrow else 12)
-        by0 = y + (1 if narrow else 0)
-        self._rank_badge(img, draw, bx0, by0, badge, best)
-        bx = bx0 + badge + 10
+        if narrow:
+            badge = 20
+            bx0 = x1 + 8
+            self._rank_badge(img, draw, bx0, y + 1, badge, best)
+            bx = bx0 + badge + 10
+        else:
+            # 钴协议只有两队，不显示名次，仅保留 Team 与胜负
+            bx = x1 + 14
         draw.rectangle((bx, y + 6, bx + 2, y + hdr - 5), fill=self.c["accent"])
         draw.text((bx + 8, y + (3 if narrow else 3)), f"Team {team_no}",
                   font=self.font("MiSans-Bold", 12 if narrow else 14), fill=self.c["ink"])
