@@ -131,7 +131,7 @@ class MatchCardV6(MatchReportRenderer):
         return super().font(name, max(1, int(round(size * self.S))))
 
     def icon(self, sub: str, ident, size, cover: bool = False):
-        if not self.assets_dir or ident in (None, "", 0):
+        if not getattr(self, "asset_roots", None) or ident in (None, "", 0):
             return None
         if isinstance(size, (tuple, list)):
             max_w, max_h = size
@@ -141,7 +141,12 @@ class MatchCardV6(MatchReportRenderer):
         ph = max(1, int(round(max_h * self.S)))
         key = (sub, str(ident), pw, ph, cover)
         if key not in self._icons:
-            path = self.assets_dir / sub / f"{ident}.png"
+            path = None
+            for _root in self.asset_roots:
+                _cand = _root / sub / f"{ident}.png"
+                if _cand.exists():
+                    path = _cand
+                    break
             im = None
             if path.exists():
                 try:

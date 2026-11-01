@@ -1862,14 +1862,34 @@ class ERProfilePlugin(Star):
                 roots.append(Path(p))
         roots.append(self.plugin_dir / "data" / "assets")
 
+        scale = float(getattr(RENDER, "match_scale", 2.0) or 2.0)
+        # 内存保护：超大画布自动降倍率（避免 OOM 拖垮进程）
+        try:
+            info = MatchCardV6.mode_of(detail) if hasattr(MatchCardV6, "mode_of") else {}
+        except Exception:
+            info = {}
         renderer = MatchCardV6(
             self.fonts_dir,
             theme=getattr(RENDER, "theme", "sakura_glow"),
-            scale=float(getattr(RENDER, "match_scale", 2.0)),
+            scale=scale,
             assets_dir=roots,
         )
+        try:
+            height = renderer._height(info, renderer._two_col(info)) if info else 0
+        except Exception:
+            height = 0
+        if height and 1080 * scale * height * scale > 40_000_000:
+            scale = max(1.0, (40_000_000 / (1080 * height)) ** 0.5)
+            logger.warning(f"[ER战绩] 对局卡片过大，倍率降至 {scale:.2f}")
+            renderer = MatchCardV6(
+                self.fonts_dir,
+                theme=getattr(RENDER, "theme", "sakura_glow"),
+                scale=scale,
+                assets_dir=roots,
+            )
+
         out = self.output_dir / f"match_overview_{game_id}.png"
-        renderer.render_overview(detail, out)
+        renderer.render_overview(detail, out, scale=scale)
         return out
 
     @filter.command("无@唤醒教程")
