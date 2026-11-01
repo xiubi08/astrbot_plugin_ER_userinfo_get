@@ -20,7 +20,7 @@
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from typing import Dict, Optional, Tuple
 
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageOps
@@ -140,9 +140,18 @@ class ThemeStyle:
     tier_rank_size: int = 0                   # 排名文字字号（0=font_tiny）
     tier_rank_y: int = 138                    # 排名第一行相对卡片顶的偏移
     tier_rank_gap: int = 24                   # 两行排名的行距
+    mmr_tier_gradient: bool = False           # MMR 数值使用段位主色的柔色渐变
+    mmr_size: int = 0                         # MMR 字号（0=font_big）
     card_gap: int = 0                         # 卡片之间的垂直间距（0=沿用 PADDING）
     header_h: int = 0                         # 总览卡片高度（0=沿用 RENDER.header_height）
     header_gap: int = 0                       # 总览与统计卡片之间的间距（0=沿用 card_gap）
+    header_layout: str = "classic"             # 总览版式：classic=旧版 / ref=参考图新版
+    ref_tier_h: int = 136                     # 新版段位徽章高度
+    ref_name_size: int = 36                   # 新版名字字号
+    ref_mmr_size: int = 34                    # 新版 MMR 字号
+    ref_sub_size: int = 16                    # 新版等级/段位线字号
+    ref_rank_size: int = 14                   # 新版排名行字号
+    tier_palette: dict = field(default_factory=dict)  # 段位名 -> (浅, 深) 两色
     section_header: Optional[RGBA] = None     # 标题底：左端色（None=不画）
     section_header2: Optional[RGBA] = None    # 标题底：右端色（None=同左端）
     chart_w: int = 550                        # 折线图宽度
@@ -819,9 +828,29 @@ SAKURA_GLOW = ThemeStyle(
     tier_rank_size=14,
     tier_rank_y=150,
     tier_rank_gap=18,
+    mmr_tier_gradient=True,
+    mmr_size=28,
     card_gap=12,
     header_h=204,
     header_gap=6,
+    header_layout="ref",
+    ref_tier_h=140,
+    ref_name_size=36,
+    ref_mmr_size=34,
+    ref_sub_size=16,
+    ref_rank_size=14,
+    tier_palette={
+        "铁阎": ((90, 96, 100), (23, 30, 36)),
+        "铜魂": ((194, 137, 100), (150, 80, 36)),
+        "银烙": ((113, 130, 149), (51, 72, 95)),
+        "金魄": ((210, 179, 123), (169, 132, 63)),
+        "修罗": ((130, 185, 187), (72, 139, 141)),
+        "灭钻": ((124, 111, 143), (65, 48, 88)),
+        "半神": ((180, 154, 123), (132, 101, 63)),
+        "永恒": ((211, 100, 144), (171, 35, 88)),
+        "星陨": ((142, 152, 191), (87, 99, 146)),
+        "无瑕": ((113, 157, 180), (51, 105, 133)),
+    },
     section_header=(255, 108, 142, 110),
     section_header2=(255, 190, 148, 110),
     chart_w=430,

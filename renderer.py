@@ -421,7 +421,216 @@ class ERRenderer:
         )
         blend_at(img, sprite, x - p, y - p)
 
+    def _tier_colors(self, player: dict):
+        """按段位名取「柔色渐变」两端色；没有对应段位时返回 None（沿用主题默认）。"""
+        pal = getattr(self.style, "tier_palette", None) or {}
+        name = str(player.get("tier_name", "") or "")
+        for key, pair in pal.items():
+            if key and key in name:
+                return pair
+        return None
+
+    def _draw_text_gradient(self, img, draw, xy, text, font, c1, c2) -> None:
+        """把文字画成「上浅下深」的竖向渐变（用文字自身做遮罩）。"""
+        bbox = draw.textbbox((0, 0), text, font=font)
+        w = bbox[2] - bbox[0]
+        h = bbox[3] - bbox[1]
+        if w <= 0 or h <= 0:
+            return
+        pad = 2
+        mask = Image.new("L", (w + pad * 2, h + pad * 2), 0)
+        ImageDraw.Draw(mask).text((pad - bbox[0], pad - bbox[1]), text, font=font, fill=255)
+        grad = rounded_gradient(w + pad * 2, h + pad * 2, 0,
+                                tuple(c1) + (255,), tuple(c2) + (255,))
+        if grad is None:
+            return
+        grad.putalpha(ImageChops.multiply(grad.getchannel("A"), mask))
+        blend_at(img, grad, xy[0] - pad, xy[1] - pad)
+
+    def _draw_header_ref(self, img: Image.Image, draw: ImageDraw.ImageDraw,
+                         player: dict, y: int, phase: str = "all") -> int:
+        """总览：左段位徽章 / 中信息 / 右 MMR 曲线（参考版式）。"""
+        st = self.style
+        x1 = self.PADDING
+        x2 = self.W - self.PADDING
+        header_h = int(getattr(st, "header_h", 0) or 190)
+        y2 = y + header_h
+
+        if phase in ("all", "fill"):
+            self._draw_card(draw, x1, y, x2, y2, only_fill=True)
+        if phase in ("all", "top"):
+            self._draw_card(draw, x1, y, x2, y2, only_outline=True)
+        if phase == "fill":
+            return y2 + 12
+
+        has_ranked = player.get("has_ranked_data", True)
+
+        # 段位色只用于 MMR 文字；曲线保持主题默认
+        colors = self._tier_colors(player)
+        self._mmr_line = None
+        self._mmr_area = None
+        self._mmr_glow = None
+
+        # ---- 左：段位徽章 ----
+        emb_h = int(getattr(st, "ref_tier_h", 136))
+        emb_w = int(round(emb_h * 0.79))
+        emb_x = x1 + 22
+        emb_y = y + (header_h - emb_h) // 2
+        tier_path = player.get("tier_full") or player.get("tier_icon", "")
+        if has_ranked and tier_path:
+            icon = self._load_icon_fixed(tier_path, (emb_w, emb_h))
+            if icon is not None:
+                self._paste_icon(img, icon, (emb_x + (emb_w - icon.size[0]) // 2, emb_y))
+
+        # ---- 中：名字 / 等级 / MMR / 段位线 / 排名 ----
+        info_x = emb_x + emb_w + 30
+        name_sz = int(getattr(st, "ref_name_size", 36))
+        name_font = self._load_named_font("MiSans-Bold", name_sz)
+        kr_font = self._load_named_font("NotoSansKR-Bold", name_sz)
+        mmr_font = self._load_named_font("MiSans-Bold", int(getattr(st, "ref_mmr_size", 34)))
+        sub_font = self._load_named_font("MiSans-Regular", int(getattr(st, "ref_sub_size", 16)))
+        rank_font = self._load_named_font("MiSans-Regular", int(getattr(st, "ref_rank_size", 14)))
+
+        player_name = player.get("name", "")
+        lv_text = f"Lv.{int(player.get('level', 0) or 0)}"
+        lv_w = draw.textbbox((0, 0), lv_text, font=sub_font)[2]
+        chart_left = x2 - int(getattr(st, "chart_w", 430)) - 24
+        max_name_w = chart_left - 20 - info_x - lv_w - 18
+
+        # 名字过长时先缩字号，再截断加省略号，确保不会压到等级和图表
+        cur_sz = name_sz
+        f_name = self._pick_font(player_name, name_font, kr_font)
+        nb = draw.textbbox((0, 0), player_name, font=f_name)
+        while (nb[2] - nb[0]) > max_name_w and cur_sz > 22:
+            cur_sz -= 2
+            f_name = self._pick_font(
+                player_name,
+                self._load_named_font("MiSans-Bold", cur_sz),
+                self._load_named_font("NotoSansKR-Bold", cur_sz))
+            nb = draw.textbbox((0, 0), player_name, font=f_name)
+        display_name = player_name
+        if (nb[2] - nb[0]) > max_name_w:
+            ell = "…"
+            while display_name and draw.textbbox((0, 0), display_name + ell, font=f_name)[2] > max_name_w:
+                display_name = display_name[:-1]
+            display_name = (display_name + ell) if display_name else ell
+            nb = draw.textbbox((0, 0), display_name, font=f_name)
+
+        name_w = nb[2] - nb[0]
+        draw.text((info_x, y + 22), display_name, font=f_name, fill=self.text)
+        # 等级底端与名字底端对齐
+        name_bottom = y + 22 + nb[3]
+        lv_bottom = draw.textbbox((0, 0), lv_text, font=sub_font)[3]
+        draw.text((info_x + name_w + 18, name_bottom - lv_bottom),
+                  lv_text, font=sub_font, fill=self.sub_text)
+
+        mmr_value = int(player.get("mmr", 0) or 0)
+        mmr_text = f"MMR: {mmr_value}"
+        if colors:
+            self._draw_text_gradient(img, draw, (info_x, y + 74), mmr_text, mmr_font,
+                                     tuple(colors[0]), tuple(colors[1]))
+        else:
+            draw.text((info_x, y + 74), mmr_text, font=mmr_font, fill=self.text)
+
+        imm = int(player.get("immortal_mmr", player.get("Immortal_mmr", 0)) or 0)
+        titan = int(player.get("titan_mmr", player.get("Titan_mmr", 0)) or 0)
+        draw.text((info_x, y + 122), f"永恒: {imm:,} | 半神: {titan:,}",
+                  font=sub_font, fill=self.sub_text)
+
+        # 排名：一行两段，靠左排，控制在图表左缘以内
+        global_rank = int(player.get("rank_global", 0) or 0)
+        global_pct = float(player.get("rank_global_percent", 0.0) or 0.0)
+        local_rank = int(player.get("rank_local", 0) or 0)
+        local_pct = float(player.get("rank_local_percent", 0.0) or 0.0)
+        g_text = f"Global {global_rank:,}名 (上位 {global_pct:.2f}%)" if global_rank > 0 else ""
+        l_text = f"Asia {local_rank:,}名 (上位 {local_pct:.2f}%)" if local_rank > 0 else ""
+        rank_y = y + 152
+        rank_right_limit = x2 - int(getattr(st, "chart_w", 430)) - 36
+        if g_text:
+            draw.text((info_x, rank_y), g_text, font=rank_font, fill=self.sub_text)
+            g_w = draw.textbbox((info_x, rank_y), g_text, font=rank_font)[2] - info_x
+        else:
+            g_w = 0
+        if l_text:
+            l_w = draw.textbbox((0, 0), l_text, font=rank_font)[2]
+            lx = info_x + (g_w + 26 if g_text else 0)
+            if lx + l_w > rank_right_limit and g_text:
+                lx = max(info_x, rank_right_limit - l_w)
+                draw.text((info_x, rank_y), g_text, font=rank_font, fill=self.sub_text)
+            draw.text((lx, rank_y), l_text, font=rank_font, fill=self.sub_text)
+
+        # ---- 右：MMR 曲线 ----
+        chart_w = int(getattr(st, "chart_w", 430))
+        chart_h = int(getattr(st, "chart_h", 158))
+        chart_x = x2 - chart_w - 24
+        chart_y = y + 12
+        mmr_chart = player.get("mmr_chart", [])
+        if has_ranked and mmr_chart:
+            self._draw_chart_panel(img, chart_x - 6, chart_y - 6, chart_w + 20, chart_h + 32)
+            try:
+                self._draw_mmr_chart(img=img, draw=draw, data=mmr_chart,
+                                     x=chart_x, y=chart_y, w=chart_w, h=chart_h)
+            except Exception:
+                pass
+            self._draw_chart_frame(img, chart_x - 6, chart_y - 6, chart_w + 20, chart_h + 32)
+
+        return y2 + 12
+
+    def _tier_accent_color(self, path: str):
+        """从段位大图里取主色：高饱和像素的加权平均，取不到就退回主题强调色。"""
+        fallback = tuple(self.style.accent[:3])
+        if not path:
+            return fallback
+        try:
+            im = Image.open(path).convert("RGBA")
+        except Exception:
+            return fallback
+        im.thumbnail((44, 56))
+        rs = gs = bs = n = 0
+        for r, g, b, a in im.getdata():
+            if a < 140:
+                continue
+            mx, mn = max(r, g, b), min(r, g, b)
+            if mx - mn < 45 or mx < 70:
+                continue
+            rs += r
+            gs += g
+            bs += b
+            n += 1
+        if n < 40:
+            return fallback
+        # 取到的平均值往往偏暗，拉到明亮的品牌色区间，才像\“柔光\”
+        import colorsys
+        r, g, b = rs // n, gs // n, bs // n
+        h, sat, val = colorsys.rgb_to_hsv(r / 255.0, g / 255.0, b / 255.0)
+        sat = min(1.0, max(0.60, sat * 1.10))
+        val = min(1.0, max(0.88, val))
+        r, g, b = colorsys.hsv_to_rgb(h, sat, val)
+        return (int(r * 255), int(g * 255), int(b * 255))
+
+    def _draw_mmr_text(self, img: Image.Image, draw: ImageDraw.ImageDraw,
+                       x: int, y: int, text: str, accent) -> None:
+        """MMR 数值：段位主色 → 同色提亮的横向柔色渐变（用文字做遮罩）。"""
+        size = int(getattr(self.style, "mmr_size", 0) or 0)
+        font = (self._load_named_font("MiSans-Bold", size) if size else self.font_big)
+        bbox = draw.textbbox((0, 0), text, font=font)
+        w = max(1, bbox[2] - bbox[0])
+        h = max(1, bbox[3] - bbox[1])
+        pad = 6
+        mask = Image.new("L", (w + pad * 2, h + pad * 2), 0)
+        ImageDraw.Draw(mask).text((pad - bbox[0], pad - bbox[1]), text, font=font, fill=255)
+
+        c1 = tuple(accent[:3])
+        c2 = tuple(int(c1[k] + (255 - c1[k]) * 0.42) for k in range(3))
+        ramp = Image.linear_gradient("L").resize((mask.size[0], 1), Image.BILINEAR)
+        base = ImageOps.colorize(ramp, c1, c2).convert("RGBA")
+        base = base.resize(mask.size, Image.BILINEAR)
+        base.putalpha(mask)
+        blend_at(img, base, x - pad, y - pad)
+
     def _draw_header(self, img: Image.Image, draw: ImageDraw.ImageDraw, player: dict, y: int, phase: str = "all") -> int:
+        if getattr(self.style, "header_layout", "classic") == "ref":
+            return self._draw_header_ref(img, draw, player, y, phase)
         x1 = self.PADDING
         x2 = self.W - self.PADDING
         header_h = int(getattr(self.style, "header_h", 0) or 190)
@@ -458,12 +667,19 @@ class ERRenderer:
         has_ranked_data = player.get("has_ranked_data", True)
 
         if has_ranked_data:
-            draw.text(
-                (name_x, name_y + 100),
-                f"MMR: {int(player.get('mmr', 0) or 0)}",
-                font=self.font_big,
-                fill=self.text,
-            )
+            _mmr_text = f"MMR: {int(player.get('mmr', 0) or 0)}"
+            if getattr(self.style, "mmr_tier_gradient", False):
+                self._draw_mmr_text(
+                    img, draw, name_x, name_y + 100, _mmr_text,
+                    self._tier_accent_color(player.get("tier_full") or player.get("tier_icon", "")),
+                )
+            else:
+                draw.text(
+                    (name_x, name_y + 100),
+                    _mmr_text,
+                    font=self.font_big,
+                    fill=self.text,
+                )
         else:
             draw.text(
                 (name_x, name_y + 100),
@@ -1997,22 +2213,25 @@ class ERRenderer:
         st = self.style
         if len(points) < 2:
             return
-        c1 = tuple(st.chart_line)
-        c2 = tuple(st.chart_line2 or st.chart_line)
+        _lc = getattr(self, "_mmr_line", None)
+        c1 = tuple(_lc[0]) if _lc else tuple(st.chart_line)
+        c2 = tuple(_lc[1]) if _lc else tuple(st.chart_line2 or st.chart_line)
         local = [(px - x, py - y) for px, py in points]
 
-        if st.chart_area is not None:
+        _area = getattr(self, "_mmr_area", st.chart_area)
+        if _area is not None:
             area = Image.new("RGBA", (w, h), (0, 0, 0, 0))
             poly = local + [(local[-1][0], chart_y2 - y), (local[0][0], chart_y2 - y)]
-            ImageDraw.Draw(area).polygon(poly, fill=tuple(st.chart_area))
+            ImageDraw.Draw(area).polygon(poly, fill=tuple(_area))
             fade = Image.linear_gradient("L").resize((w, h), Image.BILINEAR)
             alpha = ImageChops.multiply(area.getchannel("A"), ImageOps.invert(fade))
             area.putalpha(alpha)
             blend_at(img, area, x, y)
 
-        if st.chart_glow is not None:
+        _glow = getattr(self, "_mmr_glow", st.chart_glow)
+        if _glow is not None:
             halo = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-            ImageDraw.Draw(halo).line(local, fill=tuple(st.chart_glow), width=7, joint="curve")
+            ImageDraw.Draw(halo).line(local, fill=tuple(_glow), width=7, joint="curve")
             halo = halo.filter(ImageFilter.GaussianBlur(5))
             blend_at(img, halo, x, y)
 
