@@ -454,7 +454,8 @@ class ERRenderer:
         emb_h = int(getattr(st, "ref_tier_h", 136))
         emb_w = int(round(emb_h * 0.79))
         emb_x = x1 + 22
-        emb_y = y + (header_h - emb_h) // 2
+        # 段位图标/段位名整体上移，顶端与玩家名顶端对齐（原先是垂直居中）
+        emb_y = y + 22
         tier_path = player.get("tier_full") or player.get("tier_icon", "")
         if has_ranked and tier_path:
             icon = self._load_icon_fixed(tier_path, (emb_w, emb_h))
