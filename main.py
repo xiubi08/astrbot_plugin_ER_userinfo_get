@@ -1792,15 +1792,14 @@ class ERProfilePlugin(Star):
             return
 
         gid = int(gid_text)
+        yield event.plain_result(f"正在查询对局ID {gid} 的详情喵…")
+
         cache_raw = f"matchcard|{gid}|{getattr(RENDER, 'match_scale', 2.0)}"
         cache_key = hashlib.md5(cache_raw.encode("utf-8")).hexdigest()
         cached = _RESULT_IMAGE_CACHE.get(cache_key)
         if cached and Path(cached).exists():
-            yield event.plain_result(f"对局ID {gid} 的详情来啦喵～")
             yield event.image_result(str(cached))
             return
-
-        yield event.plain_result(f"正在查询对局ID {gid} 的详情喵…")
 
         try:
             detail = await asyncio.to_thread(self._fetch_match_detail, gid)
