@@ -222,48 +222,27 @@ class ERRenderer:
         }
         y_positions["matches"] = y_positions["common_heroes"] + heroes_block_h + gap
 
-        future_header = _DRAWING_POOL.submit(
-            self._draw_header, img, draw, data.get("player", {}), y_positions["header"], phase="fill"
-        )
-        future_summary = _DRAWING_POOL.submit(
-            self._draw_summary, draw, data.get("summary", {}), y_positions["summary"], phase="fill", mode_label=mode_label
-        )
-        future_heroes = _DRAWING_POOL.submit(
-            self._draw_common_heroes, img, draw, data.get("common_heroes", []), y_positions["common_heroes"], phase="fill", mode_label=mode_label
-        )
-        future_matches = _DRAWING_POOL.submit(
-            self._draw_matches, img, draw, data.get("matches", []), y_positions["matches"], phase="fill",
-            first_extra_h=detail_h, detail=first_detail,
-        )
-
-        # 等待所有填充任务完成
-        future_header.result()
-        future_summary.result()
-        future_heroes.result()
-        future_matches.result()
+        # 注意：所有绘制都在同一张画布上，必须串行执行；
+        # 之前用线程池并行绘制同一 img/draw，会偶发出现「白色块盖住文字」的错乱。
+        self._draw_header(img, draw, data.get("player", {}), y_positions["header"], phase="fill")
+        self._draw_summary(draw, data.get("summary", {}), y_positions["summary"], phase="fill",
+                           mode_label=mode_label)
+        self._draw_common_heroes(img, draw, data.get("common_heroes", []),
+                                 y_positions["common_heroes"], phase="fill", mode_label=mode_label)
+        self._draw_matches(img, draw, data.get("matches", []), y_positions["matches"], phase="fill",
+                           first_extra_h=detail_h, detail=first_detail)
 
         # ========= 阶段2：猫爪水印（中间层 - 在卡片之上、文字之下） =========
         self._add_cat_paw_watermark(img)
 
         # ========= 阶段3：绘制边框 + 文字 + 图片（最顶层） =========
-        future_header_top = _DRAWING_POOL.submit(
-            self._draw_header, img, draw, data.get("player", {}), y_positions["header"], phase="top"
-        )
-        future_summary_top = _DRAWING_POOL.submit(
-            self._draw_summary, draw, data.get("summary", {}), y_positions["summary"], phase="top", mode_label=mode_label
-        )
-        future_heroes_top = _DRAWING_POOL.submit(
-            self._draw_common_heroes, img, draw, data.get("common_heroes", []), y_positions["common_heroes"], phase="top", mode_label=mode_label
-        )
-        future_matches_top = _DRAWING_POOL.submit(
-            self._draw_matches, img, draw, data.get("matches", []), y_positions["matches"], phase="top",
-            first_extra_h=detail_h, detail=first_detail,
-        )
-
-        future_header_top.result()
-        future_summary_top.result()
-        future_heroes_top.result()
-        future_matches_top.result()
+        self._draw_header(img, draw, data.get("player", {}), y_positions["header"], phase="top")
+        self._draw_summary(draw, data.get("summary", {}), y_positions["summary"], phase="top",
+                           mode_label=mode_label)
+        self._draw_common_heroes(img, draw, data.get("common_heroes", []),
+                                 y_positions["common_heroes"], phase="top", mode_label=mode_label)
+        self._draw_matches(img, draw, data.get("matches", []), y_positions["matches"], phase="top",
+                           first_extra_h=detail_h, detail=first_detail)
 
         # ========= 阶段4：页脚与辅助文字绘制 =========
         footer_text = "Powered by 椛椿&小休比"
