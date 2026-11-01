@@ -1835,7 +1835,8 @@ class ERProfilePlugin(Star):
                         break
         except Exception as e:
             logger.debug(f"[ER战绩] 赛季列表获取失败，降级为当前赛季: {e}")
-        ids = sorted(set(out), reverse=True)[:8] or [0]
+        # 0 = 当前赛季；其余为历史赛季（新→旧）
+        ids = [0] + [i for i in sorted(set(out), reverse=True)[:8] if i != 0]
         self._season_ids_cache = ids
         return ids
 
