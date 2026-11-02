@@ -428,6 +428,7 @@ class ERRenderer:
                                 tuple(c1) + (255,), tuple(c2) + (255,))
         if grad is None:
             return
+        grad = grad.copy()   # 防止改动缓存精灵
         grad.putalpha(ImageChops.multiply(grad.getchannel("A"), mask))
         blend_at(img, grad, xy[0] - pad, xy[1] - pad)
 

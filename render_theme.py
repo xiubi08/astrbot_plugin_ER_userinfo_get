@@ -236,13 +236,13 @@ def _sprite(key: tuple, factory):
     with _SPRITES_LOCK:
         hit = _SPRITES.get(key)
     if hit is not None:
-        return hit
+        return hit.copy()   # 必须返回副本：调用方会 putalpha 就地修改
     made = factory()
     with _SPRITES_LOCK:
         if len(_SPRITES) > _SPRITE_BUDGET:
             _SPRITES.clear()
         _SPRITES[key] = made
-    return made
+    return made.copy()
 
 
 def _vgrad(w: int, h: int, top: RGBA, bottom: RGBA) -> Image.Image:
