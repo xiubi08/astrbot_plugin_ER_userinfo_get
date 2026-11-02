@@ -59,6 +59,10 @@ _PAW_BASE_LOCK = threading.RLock()
 _PAW_BASE_LOCK_TIMEOUT = LOCK.paw_base_lock_timeout
 
 # 全局并发绘制池（用于提高CPU利用率）
+# 渲染全局串行锁：PIL 的 ImageFont / ImageDraw 在多线程下并发使用会偶发
+# 字形错乱（数字被「白色细线」切断），低配机器上更容易复现。
+_RENDER_LOCK = threading.RLock()
+
 _DRAWING_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="er_draw_thread")
 
 class ERRenderer:
@@ -159,19 +163,20 @@ class ERRenderer:
     # 对外入口
     # =========================
     def render(self, data: dict[str, Any]) -> str:
-        """渲染入口。使用带超时的信号量，避免渲染异常时所有线程卡死等待。"""
-        try:
-            with _acquire_timeout(
-                ERRenderer._render_semaphore,
-                ERRenderer._RENDER_SEMAPHORE_TIMEOUT,
-                "render_semaphore",
-            ):
+        """渲染入口。全局串行，避免 PIL 字体/画布被多线程并发使用导致字形错乱。"""
+        with _RENDER_LOCK:
+            try:
+                with _acquire_timeout(
+                    ERRenderer._render_semaphore,
+                    ERRenderer._RENDER_SEMAPHORE_TIMEOUT,
+                    "render_semaphore",
+                ):
+                    return self._render_inner(data)
+            except _RendererLockTimeoutError as e:
+                # 信号量获取超时：有可能前3个渲染任务全部卡住，
+                # 这里降级为不限制并发直接渲染，避免用户请求彻底失败
+                logger.warning(f"[ER渲染] 并发渲染信号量等待超时，降级为直接渲染: {e}")
                 return self._render_inner(data)
-        except _RendererLockTimeoutError as e:
-            # 信号量获取超时：有可能前3个渲染任务全部卡住，
-            # 这里降级为不限制并发直接渲染，避免用户请求彻底失败
-            logger.warning(f"[ER渲染] 并发渲染信号量等待超时，降级为直接渲染: {e}")
-            return self._render_inner(data)
 
     def _render_inner(self, data: dict[str, Any]) -> str:
         matches = data.get("matches", [])
@@ -2781,16 +2786,17 @@ class ERRenderer:
 
     def render_character_ranking(self, data: dict[str, Any]) -> str:
         """渲染入口。使用带超时的信号量，避免渲染异常时所有线程卡死等待。"""
-        try:
-            with _acquire_timeout(
-                ERRenderer._render_semaphore,
-                ERRenderer._RENDER_SEMAPHORE_TIMEOUT,
-                "render_semaphore",
-            ):
+        with _RENDER_LOCK:
+            try:
+                with _acquire_timeout(
+                    ERRenderer._render_semaphore,
+                    ERRenderer._RENDER_SEMAPHORE_TIMEOUT,
+                    "render_semaphore",
+                ):
+                    return self._render_character_ranking_inner(data)
+            except _RendererLockTimeoutError as e:
+                logger.warning(f"[ER渲染] 并发渲染信号量等待超时，降级为直接渲染: {e}")
                 return self._render_character_ranking_inner(data)
-        except _RendererLockTimeoutError as e:
-            logger.warning(f"[ER渲染] 并发渲染信号量等待超时，降级为直接渲染: {e}")
-            return self._render_character_ranking_inner(data)
 
     def _render_character_ranking_inner(self, data: dict[str, Any]) -> str:
         ranking = data.get("ranking", [])
@@ -3035,16 +3041,17 @@ class ERRenderer:
 
     def render_character_stats(self, data: dict[str, Any]) -> str:
         """渲染入口。使用带超时的信号量，避免渲染异常时所有线程卡死等待。"""
-        try:
-            with _acquire_timeout(
-                ERRenderer._render_semaphore,
-                ERRenderer._RENDER_SEMAPHORE_TIMEOUT,
-                "render_semaphore",
-            ):
+        with _RENDER_LOCK:
+            try:
+                with _acquire_timeout(
+                    ERRenderer._render_semaphore,
+                    ERRenderer._RENDER_SEMAPHORE_TIMEOUT,
+                    "render_semaphore",
+                ):
+                    return self._render_character_stats_inner(data)
+            except _RendererLockTimeoutError as e:
+                logger.warning(f"[ER渲染] 并发渲染信号量等待超时，降级为直接渲染: {e}")
                 return self._render_character_stats_inner(data)
-        except _RendererLockTimeoutError as e:
-            logger.warning(f"[ER渲染] 并发渲染信号量等待超时，降级为直接渲染: {e}")
-            return self._render_character_stats_inner(data)
 
     def _render_character_stats_inner(self, data: dict[str, Any]) -> str:
         FOOTER_H = RENDER.footer_height
@@ -3110,55 +3117,28 @@ class ERRenderer:
             y_positions["item_stats"] = cur_y
             cur_y += items_h + self.PADDING
 
-        futures_fill = []
-        futures_fill.append(_DRAWING_POOL.submit(
-            self._draw_char_header, img, draw, data, y_positions["char_header"], phase="fill"
-        ))
-        futures_fill.append(_DRAWING_POOL.submit(
-            self._draw_char_stats, img, draw, data, y_positions["char_stats"], phase="fill"
-        ))
-
+        # 同一张画布必须串行绘制：并行会偶发字形/色块错乱
+        self._draw_char_header(img, draw, data, y_positions["char_header"], phase="fill")
+        self._draw_char_stats(img, draw, data, y_positions["char_stats"], phase="fill")
         if has_skills or has_tactical:
-            futures_fill.append(_DRAWING_POOL.submit(
-                self._draw_char_skills_tactical_row, img, draw, data, y_positions["skills_and_tactical"], skills_h, phase="fill"
-            ))
+            self._draw_char_skills_tactical_row(img, draw, data, y_positions["skills_and_tactical"],
+                                                skills_h, phase="fill")
         if has_traits:
-            futures_fill.append(_DRAWING_POOL.submit(
-                self._draw_char_trait_builds, img, draw, data, y_positions["trait_builds"], traits_h, phase="fill"
-            ))
+            self._draw_char_trait_builds(img, draw, data, y_positions["trait_builds"], traits_h, phase="fill")
         if has_items:
-            futures_fill.append(_DRAWING_POOL.submit(
-                self._draw_char_item_stats, img, draw, data, y_positions["item_stats"], items_h, phase="fill"
-            ))
-
-        for f in futures_fill:
-            f.result()
+            self._draw_char_item_stats(img, draw, data, y_positions["item_stats"], items_h, phase="fill")
 
         self._add_cat_paw_watermark(img)
 
-        futures_top = []
-        futures_top.append(_DRAWING_POOL.submit(
-            self._draw_char_header, img, draw, data, y_positions["char_header"], phase="top"
-        ))
-        futures_top.append(_DRAWING_POOL.submit(
-            self._draw_char_stats, img, draw, data, y_positions["char_stats"], phase="top"
-        ))
-
+        self._draw_char_header(img, draw, data, y_positions["char_header"], phase="top")
+        self._draw_char_stats(img, draw, data, y_positions["char_stats"], phase="top")
         if has_skills or has_tactical:
-            futures_top.append(_DRAWING_POOL.submit(
-                self._draw_char_skills_tactical_row, img, draw, data, y_positions["skills_and_tactical"], skills_h, phase="top"
-            ))
+            self._draw_char_skills_tactical_row(img, draw, data, y_positions["skills_and_tactical"],
+                                                skills_h, phase="top")
         if has_traits:
-            futures_top.append(_DRAWING_POOL.submit(
-                self._draw_char_trait_builds, img, draw, data, y_positions["trait_builds"], traits_h, phase="top"
-            ))
+            self._draw_char_trait_builds(img, draw, data, y_positions["trait_builds"], traits_h, phase="top")
         if has_items:
-            futures_top.append(_DRAWING_POOL.submit(
-                self._draw_char_item_stats, img, draw, data, y_positions["item_stats"], items_h, phase="top"
-            ))
-
-        for f in futures_top:
-            f.result()
+            self._draw_char_item_stats(img, draw, data, y_positions["item_stats"], items_h, phase="top")
 
         footer_y = cur_y + 10
         footer_text = "Powered by 椛椿&小休比"
